@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Optional
 
 import numpy as np
@@ -13,6 +14,13 @@ from .text_refiner import TextRefiner
 from .whisper_engine import WhisperEngine
 
 log = logging.getLogger(__name__)
+
+_CORRECTION_CUE_RE = re.compile(
+    r"\b(sorry|i mean|i meant|actually|no wait|wait no|scratch that|"
+    r"never mind|let me rephrase|correction|rather)\b",
+    re.IGNORECASE,
+)
+_COMPLEX_TEXT_RE = re.compile(r"[,:;]|(?:\b(and|but|because|then)\b)", re.IGNORECASE)
 
 
 class TranscriptionPipeline:
@@ -59,21 +67,39 @@ class TranscriptionPipeline:
         log.info("After regex cleanup: %s", cleaned)
 
         # 3. LLM refinement (standard + max_accuracy modes)
-        if self.refiner and self.config.cleanup_mode != "fast":
-            if len(cleaned.split()) >= 3:
-                try:
-                    refined = self.refiner.refine(
-                        cleaned, self.dictionary.get_all_terms()
-                    )
-                    if refined.strip():
-                        cleaned = refined
-                        log.info("After LLM refinement: %s", cleaned)
-                except Exception as e:
-                    log.warning(
-                        "LLM refinement failed, using regex result: %s", e
-                    )
+        if (
+            self.refiner
+            and self.config.cleanup_mode != "fast"
+            and self._should_refine(cleaned)
+        ):
+            try:
+                refined = self.refiner.refine(
+                    cleaned, self.dictionary.get_all_terms()
+                )
+                if refined.strip():
+                    cleaned = refined
+                    log.info("After LLM refinement: %s", cleaned)
+                else:
+                    log.warning("LLM output rejected as prompt/meta leakage")
+            except Exception as e:
+                log.warning(
+                    "LLM refinement failed, using regex result: %s", e
+                )
 
         return cleaned
+
+    def _should_refine(self, text: str) -> bool:
+        """Heuristic gate to avoid unnecessary LLM calls and reduce latency."""
+        word_count = len(text.split())
+        if word_count < 4:
+            return False
+        if _CORRECTION_CUE_RE.search(text):
+            return True
+        if word_count <= 8 and text.endswith((".", "!", "?")):
+            return False
+        if word_count < 12 and not _COMPLEX_TEXT_RE.search(text):
+            return False
+        return True
 
     def _transcribe_with_fallback(self, audio: np.ndarray, tech_context: str) -> str:
         """Transcribe audio and fall back to turbo model if max-accuracy model fails."""

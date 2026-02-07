@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import gc
 import logging
+import re
 
 log = logging.getLogger(__name__)
 
@@ -92,8 +93,8 @@ class TextRefiner:
         from mlx_lm import generate  # type: ignore[import-untyped]
         from mlx_lm.sample_utils import make_sampler  # type: ignore[import-untyped]
 
-        max_tokens = min(max(int(len(text.split()) * 3), 64), 512)
-        sampler = make_sampler(temp=0.1)
+        max_tokens = min(max(int(len(text.split()) * 2), 20), 96)
+        sampler = make_sampler(temp=0.0)
         result = generate(
             self.model,
             self.tokenizer,
@@ -101,4 +102,36 @@ class TextRefiner:
             max_tokens=max_tokens,
             sampler=sampler,
         )
-        return result.strip()
+        return self._sanitize_output(result)
+
+    @staticmethod
+    def _sanitize_output(result: str) -> str:
+        """Strip prompt leakage / meta responses from model output."""
+        text = result.strip()
+        if not text:
+            return ""
+
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        candidate = lines[0] if lines else text
+        candidate = candidate.strip().strip("`").strip()
+        candidate = re.sub(
+            r'^(cleaned text|corrected text|revised text|output)\s*:\s*',
+            '',
+            candidate,
+            flags=re.IGNORECASE,
+        ).strip()
+        candidate = candidate.strip('"').strip("'").strip()
+
+        lower = candidate.lower()
+        leak_markers = (
+            "you are a",
+            "system prompt",
+            "rules:",
+            "self-correction examples",
+            "as an ai",
+            "this version is concise",
+            "this version is",
+        )
+        if any(marker in lower for marker in leak_markers):
+            return ""
+        return candidate

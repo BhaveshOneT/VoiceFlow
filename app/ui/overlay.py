@@ -17,15 +17,15 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-_PILL_WIDTH = 160
-_PILL_HEIGHT = 36
+_PILL_WIDTH = 220
+_PILL_HEIGHT = 44
 _BOTTOM_MARGIN = 72  # distance from bottom of screen
 _CORNER_RADIUS = _PILL_HEIGHT / 2
 
-_DOT_DIAMETER = 10
-_DOT_LEFT_PADDING = 16
+_ICON_DIAMETER = 22
+_ICON_LEFT_PADDING = 14
 
-_LABEL_FONT_SIZE = 13.0
+_LABEL_FONT_SIZE = 14.0
 
 _FADE_DURATION = 0.25
 _PULSE_DURATION = 1.0
@@ -59,6 +59,8 @@ class RecordingOverlay:
         self._dot_layer: Quartz.CALayer | None = None
         self._label: AppKit.NSTextField | None = None
         self._dot_view: AppKit.NSView | None = None
+        self._ring_layer: Quartz.CALayer | None = None
+        self._spinner: AppKit.NSProgressIndicator | None = None
         self._built = False
 
     # ------------------------------------------------------------------
@@ -131,26 +133,73 @@ class RecordingOverlay:
             container = solid
 
         # --- red dot (recording indicator) ---
-        dot_y = (_PILL_HEIGHT - _DOT_DIAMETER) / 2
-        dot_frame = AppKit.NSMakeRect(_DOT_LEFT_PADDING, dot_y, _DOT_DIAMETER, _DOT_DIAMETER)
+        dot_y = (_PILL_HEIGHT - _ICON_DIAMETER) / 2
+        dot_frame = AppKit.NSMakeRect(
+            _ICON_LEFT_PADDING, dot_y, _ICON_DIAMETER, _ICON_DIAMETER
+        )
         dot_view = AppKit.NSView.alloc().initWithFrame_(dot_frame)
         dot_view.setWantsLayer_(True)
         dot_layer = dot_view.layer()
         dot_layer.setBackgroundColor_(
-            AppKit.NSColor.redColor().CGColor()
+            AppKit.NSColor.systemRedColor().CGColor()
         )
-        dot_layer.setCornerRadius_(_DOT_DIAMETER / 2)
+        dot_layer.setCornerRadius_(_ICON_DIAMETER / 2)
+        dot_layer.setMasksToBounds_(False)
+        ring_layer = Quartz.CALayer.layer()
+        ring_layer.setFrame_(dot_view.bounds())
+        ring_layer.setBorderWidth_(2.0)
+        ring_layer.setBorderColor_(
+            AppKit.NSColor.systemRedColor().colorWithAlphaComponent_(0.7).CGColor()
+        )
+        ring_layer.setCornerRadius_(_ICON_DIAMETER / 2)
+        ring_layer.setOpacity_(0.0)
+        dot_layer.addSublayer_(ring_layer)
+        self._ring_layer = ring_layer
+
+        # Prefer a microphone glyph over a plain dot.
+        try:
+            symbol = AppKit.NSImage.imageWithSystemSymbolName_accessibilityDescription_(
+                "mic.fill", "Recording"
+            )
+            if symbol is not None:
+                icon_view = AppKit.NSImageView.alloc().initWithFrame_(
+                    AppKit.NSMakeRect(5, 4, _ICON_DIAMETER - 10, _ICON_DIAMETER - 8)
+                )
+                icon_view.setImage_(symbol)
+                icon_view.setContentTintColor_(AppKit.NSColor.whiteColor())
+                icon_view.setImageScaling_(AppKit.NSImageScaleProportionallyUpOrDown)
+                dot_view.addSubview_(icon_view)
+        except Exception:
+            log.debug("SF Symbol not available for overlay icon")
+
         container.addSubview_(dot_view)
         self._dot_layer = dot_layer
         self._dot_view = dot_view
 
+        spinner = AppKit.NSProgressIndicator.alloc().initWithFrame_(
+            AppKit.NSMakeRect(_ICON_LEFT_PADDING, dot_y, _ICON_DIAMETER, _ICON_DIAMETER)
+        )
+        spinner.setStyle_(AppKit.NSProgressIndicatorSpinningStyle)
+        spinner.setDisplayedWhenStopped_(False)
+        spinner.setControlSize_(AppKit.NSControlSizeSmall)
+        spinner.stopAnimation_(None)
+        spinner.setHidden_(True)
+        container.addSubview_(spinner)
+        self._spinner = spinner
+
         # --- label ---
-        label_x = _DOT_LEFT_PADDING + _DOT_DIAMETER + 8
-        label_width = _PILL_WIDTH - label_x - 12
-        label_frame = AppKit.NSMakeRect(label_x, 0, label_width, _PILL_HEIGHT)
+        label_x = _ICON_LEFT_PADDING + _ICON_DIAMETER + 12
+        label_width = _PILL_WIDTH - label_x - 14
+        label_height = 20
+        label_y = (_PILL_HEIGHT - label_height) / 2
+        label_frame = AppKit.NSMakeRect(label_x, label_y, label_width, label_height)
         label = AppKit.NSTextField.labelWithString_("Recording")
         label.setFrame_(label_frame)
-        label.setFont_(AppKit.NSFont.systemFontOfSize_weight_(_LABEL_FONT_SIZE, AppKit.NSFontWeightMedium))
+        label.setFont_(
+            AppKit.NSFont.systemFontOfSize_weight_(
+                _LABEL_FONT_SIZE, AppKit.NSFontWeightSemibold
+            )
+        )
         label.setTextColor_(AppKit.NSColor.whiteColor())
         label.setAlignment_(AppKit.NSTextAlignmentLeft)
         label.setLineBreakMode_(AppKit.NSLineBreakByTruncatingTail)
@@ -189,6 +238,9 @@ class RecordingOverlay:
                 return
             self._label.setStringValue_("Recording")
             self._dot_view.setHidden_(False)
+            if self._spinner is not None:
+                self._spinner.stopAnimation_(None)
+                self._spinner.setHidden_(True)
             self._start_pulse()
             self._fade_in()
         except Exception:
@@ -199,9 +251,13 @@ class RecordingOverlay:
             self._ensure_built()
             if not self._built:
                 return
-            self._label.setStringValue_("Processing...")
+            self._label.setStringValue_("Transcribing...")
             self._stop_pulse()
-            self._dot_view.setHidden_(True)
+            if self._dot_view is not None:
+                self._dot_view.setHidden_(True)
+            if self._spinner is not None:
+                self._spinner.setHidden_(False)
+                self._spinner.startAnimation_(None)
             self._fade_in()
         except Exception:
             log.exception("Error showing processing overlay")
@@ -211,6 +267,9 @@ class RecordingOverlay:
             if not self._built or self._panel is None:
                 return
             self._stop_pulse()
+            if self._spinner is not None:
+                self._spinner.stopAnimation_(None)
+                self._spinner.setHidden_(True)
             self._fade_out()
         except Exception:
             log.exception("Error hiding overlay")
@@ -254,18 +313,36 @@ class RecordingOverlay:
         if self._dot_layer is None:
             return
         try:
-            pulse = Quartz.CABasicAnimation.animationWithKeyPath_("opacity")
-            pulse.setFromValue_(1.0)
-            pulse.setToValue_(0.3)
-            pulse.setDuration_(_PULSE_DURATION)
-            pulse.setAutoreverses_(True)
-            pulse.setRepeatCount_(float("inf"))
-            pulse.setTimingFunction_(
-                Quartz.CAMediaTimingFunction.functionWithName_(
-                    Quartz.kCAMediaTimingFunctionEaseInEaseOut
+            icon_pulse = Quartz.CABasicAnimation.animationWithKeyPath_("transform.scale")
+            icon_pulse.setFromValue_(1.0)
+            icon_pulse.setToValue_(1.08)
+            icon_pulse.setDuration_(0.65)
+            icon_pulse.setAutoreverses_(True)
+            icon_pulse.setRepeatCount_(float("inf"))
+            self._dot_layer.addAnimation_forKey_(icon_pulse, "iconPulse")
+
+            if self._ring_layer is not None:
+                ring_scale = Quartz.CABasicAnimation.animationWithKeyPath_("transform.scale")
+                ring_scale.setFromValue_(1.0)
+                ring_scale.setToValue_(1.8)
+                ring_scale.setDuration_(_PULSE_DURATION)
+                ring_scale.setRepeatCount_(float("inf"))
+                ring_fade = Quartz.CABasicAnimation.animationWithKeyPath_("opacity")
+                ring_fade.setFromValue_(0.9)
+                ring_fade.setToValue_(0.0)
+                ring_fade.setDuration_(_PULSE_DURATION)
+                ring_fade.setRepeatCount_(float("inf"))
+                group = Quartz.CAAnimationGroup.animation()
+                group.setAnimations_([ring_scale, ring_fade])
+                group.setDuration_(_PULSE_DURATION)
+                group.setRepeatCount_(float("inf"))
+                group.setTimingFunction_(
+                    Quartz.CAMediaTimingFunction.functionWithName_(
+                        Quartz.kCAMediaTimingFunctionEaseOut
+                    )
                 )
-            )
-            self._dot_layer.addAnimation_forKey_(pulse, "pulse")
+                self._ring_layer.addAnimation_forKey_(group, "ringPulse")
+                self._ring_layer.setOpacity_(1.0)
         except Exception:
             log.debug("Pulse animation failed (non-fatal)")
 
@@ -273,7 +350,12 @@ class RecordingOverlay:
         if self._dot_layer is None:
             return
         try:
-            self._dot_layer.removeAnimationForKey_("pulse")
+            self._dot_layer.removeAnimationForKey_("iconPulse")
             self._dot_layer.setOpacity_(1.0)
+            self._dot_layer.setTransform_(Quartz.CATransform3DIdentity)
+            if self._ring_layer is not None:
+                self._ring_layer.removeAnimationForKey_("ringPulse")
+                self._ring_layer.setOpacity_(0.0)
+                self._ring_layer.setTransform_(Quartz.CATransform3DIdentity)
         except Exception:
             pass

@@ -44,8 +44,10 @@ class WhisperEngine:
         dummy = np.zeros(16000, dtype=np.float32)  # 1 second of silence
         try:
             self.transcribe(dummy)
-        except Exception:
-            pass  # Warm-up may produce empty result; that's fine
+        except Exception as exc:
+            raise RuntimeError(
+                f"Whisper warm-up failed for model '{self.model_name}': {exc}"
+            ) from exc
         self._warmed_up = True
         log.info("Whisper warm-up complete")
 

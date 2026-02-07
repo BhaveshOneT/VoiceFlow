@@ -48,7 +48,7 @@ class TranscriptionPipeline:
         """Run the full pipeline on audio data. Returns cleaned text."""
         # 1. Whisper transcription
         tech_context = self.dictionary.get_whisper_context()
-        raw = self.whisper.transcribe(audio, tech_context=tech_context)
+        raw = self._transcribe_with_fallback(audio, tech_context=tech_context)
         log.info("Raw transcription: %s", raw)
 
         if not raw.strip():
@@ -74,6 +74,47 @@ class TranscriptionPipeline:
                     )
 
         return cleaned
+
+    def _transcribe_with_fallback(self, audio: np.ndarray, tech_context: str) -> str:
+        """Transcribe audio and fall back to turbo model if max-accuracy model fails."""
+        primary_error: Exception | None = None
+        try:
+            return self.whisper.transcribe(audio, tech_context=tech_context)
+        except Exception as exc:
+            primary_error = exc
+            log.exception(
+                "Primary Whisper transcription failed with model %s",
+                self.whisper.model_name,
+            )
+
+        fallback_model = self.config.whisper_model
+        if self.whisper.model_name == fallback_model:
+            raise RuntimeError(
+                f"Whisper transcription failed with model '{self.whisper.model_name}'"
+            ) from primary_error
+
+        log.warning(
+            "Retrying transcription with fallback model %s", fallback_model
+        )
+        fallback_engine = WhisperEngine(
+            model_name=fallback_model,
+            language=self.config.language,
+        )
+        try:
+            fallback_engine.warm_up()
+            raw = fallback_engine.transcribe(audio, tech_context=tech_context)
+            self.whisper = fallback_engine
+            log.warning(
+                "Fallback transcription succeeded; switched active model to %s",
+                fallback_model,
+            )
+            return raw
+        except Exception as fallback_error:
+            raise RuntimeError(
+                f"Whisper transcription failed on primary model "
+                f"'{self.config.max_accuracy_whisper_model}' and fallback "
+                f"'{fallback_model}'"
+            ) from fallback_error
 
     def warm_up(self) -> None:
         """Load and warm up all models."""

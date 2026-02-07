@@ -18,10 +18,27 @@ from app.input.hotkey import HotkeyListener
 from app.input.text_inserter import TextInserter
 from app.ui.overlay import RecordingOverlay
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(name)s %(levelname)s %(message)s",
-)
+LOG_DIR = Path.home() / "Library" / "Application Support" / "VoiceFlow" / "logs"
+LOG_PATH = LOG_DIR / "voiceflow.log"
+
+
+def _configure_logging() -> None:
+    handlers: list[logging.Handler] = [logging.StreamHandler()]
+    try:
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        handlers.append(logging.FileHandler(LOG_PATH, encoding="utf-8"))
+    except Exception:
+        # Keep stdout logging even if file logging is unavailable.
+        pass
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(name)s %(levelname)s %(message)s",
+        handlers=handlers,
+        force=True,
+    )
+
+
+_configure_logging()
 log = logging.getLogger(__name__)
 
 RESOURCES = Path(__file__).parent / "resources"
@@ -184,11 +201,12 @@ class VoiceFlowApp(rumps.App):
         """Run the transcription pipeline and insert the result."""
         try:
             result = self.pipeline.process(audio)
-        except Exception:
+        except Exception as exc:
             log.exception("Transcription failed")
+            detail = str(exc).strip() or exc.__class__.__name__
             self._show_error(
                 title="Transcription failed",
-                message="Failed to transcribe audio. Check model downloads and logs.",
+                message=f"{detail}. Check VoiceFlow logs for details.",
             )
             return
         finally:

@@ -40,7 +40,10 @@ for pkg in ["mlx", "mlx_lm", "mlx_whisper", "transformers"]:
     all_hiddenimports += hiddenimports
 
 # App resources
-app_resources = [("app/resources/default_dictionary.json", "resources")]
+app_resources = [
+    ("app/resources/default_dictionary.json", "resources"),
+    ("app/resources/icons/voiceflow.icns", "resources/icons"),
+]
 
 # sounddevice needs its PortAudio binary
 sounddevice_data = os.path.join(SITE_PKGS, "_sounddevice_data")
@@ -84,6 +87,7 @@ exe = EXE(
     [],
     exclude_binaries=True,
     name="VoiceFlow",
+    icon="app/resources/icons/voiceflow.icns",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -103,12 +107,14 @@ coll = COLLECT(
 app = BUNDLE(
     coll,
     name="VoiceFlow.app",
+    icon="app/resources/icons/voiceflow.icns",
     bundle_identifier="com.voiceflow.dictation",
     info_plist={
         "CFBundleName": "VoiceFlow",
         "CFBundleDisplayName": "VoiceFlow",
         "CFBundleVersion": "1.0.0",
         "CFBundleShortVersionString": "1.0.0",
+        "CFBundleIconFile": "voiceflow.icns",
         "LSMinimumSystemVersion": "13.0",
         "LSUIElement": True,
         "NSMicrophoneUsageDescription": (

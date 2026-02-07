@@ -6,7 +6,66 @@ import re
 
 log = logging.getLogger(__name__)
 
-DEFAULT_MODEL = "mlx-community/Qwen2.5-1.5B-Instruct-4bit"
+DEFAULT_MODEL = "mlx-community/Qwen2.5-3B-Instruct-4bit"
+_QUESTION_START_RE = re.compile(
+    r"^\s*(who|what|when|where|why|how|is|are|am|was|were|do|does|did|can|"
+    r"could|should|would|will|which|whose|whom|what's|whats|isn't|aren't|"
+    r"won't|can't|couldn't|shouldn't|wouldn't|wer|was|wann|wo|warum|wie|"
+    r"ist|sind|bin|war|waren|kann|kannst|können|soll|sollte|würde|"
+    r"hat|haben|gibt|gibt's)\b",
+    re.IGNORECASE,
+)
+_TOKEN_RE = re.compile(r"[A-Za-z0-9_']+")
+_COMMON_WORDS = {
+    "a",
+    "an",
+    "and",
+    "are",
+    "as",
+    "at",
+    "be",
+    "but",
+    "by",
+    "for",
+    "from",
+    "how",
+    "i",
+    "in",
+    "is",
+    "it",
+    "its",
+    "me",
+    "my",
+    "of",
+    "on",
+    "or",
+    "our",
+    "that",
+    "the",
+    "this",
+    "to",
+    "we",
+    "what",
+    "when",
+    "where",
+    "which",
+    "who",
+    "why",
+    "with",
+    "you",
+    "your",
+}
+_ANSWER_START_RE = re.compile(
+    r"^\s*(yes|no|it\s+is|it's|this\s+is|the\s+answer|you\s+can|you\s+should|"
+    r"because|in\s+summary|to\s+answer|ja|nein|die\s+antwort|"
+    r"du\s+kannst|sie\s+können|weil|kurz\s+gesagt)\b",
+    re.IGNORECASE,
+)
+_ASSISTANTY_START_RE = re.compile(
+    r"^\s*(sure|certainly|absolutely|here(?:'s| is)|let's|i can|"
+    r"you can|to do this|first,|here are|this version)\b",
+    re.IGNORECASE,
+)
 
 SYSTEM_PROMPT_TEMPLATE = """\
 You are a speech-to-text post-processor for a software developer.
@@ -28,7 +87,9 @@ Backtracking signals include: "sorry", "I mean", "I meant", "actually", \
 6. Fix grammar and add natural punctuation
 7. Do NOT add information that was not spoken
 8. Do NOT summarize — keep all intended content
-9. Output ONLY the cleaned text, nothing else
+9. Do NOT answer questions in the text
+10. Do NOT provide explanations, suggestions, or completions
+11. Output ONLY the cleaned transcript text, nothing else
 
 SELF-CORRECTION EXAMPLES:
 - "change it to red, sorry, blue" -> "change it to blue"
@@ -38,7 +99,12 @@ SELF-CORRECTION EXAMPLES:
 - "delete the file, scratch that, just rename it" -> "just rename it"
 - "use a for loop, never mind that, use map instead" -> "use map instead"
 - "send it to the staging, wait no, production server" -> "send it to the production server"
-- "I want to use, no wait, I mean useState" -> "I want to use useState\""""
+- "I want to use, no wait, I mean useState" -> "I want to use useState"
+
+QUESTION EXAMPLES:
+- "what is polymorphism in oop" -> "What is polymorphism in OOP?"
+- "how do I reset my api key" -> "How do I reset my API key?"
+"""
 
 
 class TextRefiner:
@@ -102,7 +168,15 @@ class TextRefiner:
             max_tokens=max_tokens,
             sampler=sampler,
         )
-        return self._sanitize_output(result)
+        candidate = self._sanitize_output(result)
+        if not candidate:
+            return ""
+        if self._is_answer_like(source=text, candidate=candidate):
+            log.warning(
+                "Rejected LLM refinement that changed intent or looked like an answer."
+            )
+            return ""
+        return candidate
 
     @staticmethod
     def _sanitize_output(result: str) -> str:
@@ -112,26 +186,80 @@ class TextRefiner:
             return ""
 
         lines = [line.strip() for line in text.splitlines() if line.strip()]
-        candidate = lines[0] if lines else text
-        candidate = candidate.strip().strip("`").strip()
-        candidate = re.sub(
-            r'^(cleaned text|corrected text|revised text|output)\s*:\s*',
-            '',
-            candidate,
-            flags=re.IGNORECASE,
-        ).strip()
-        candidate = candidate.strip('"').strip("'").strip()
+        for line in lines or [text]:
+            candidate = line.strip().strip("`").strip()
+            candidate = re.sub(r"^\s*[-*]\s+", "", candidate)
+            candidate = re.sub(
+                r'^(cleaned text|corrected text|revised text|output|answer|response|'
+                r'explanation|final|result)\s*:\s*',
+                '',
+                candidate,
+                flags=re.IGNORECASE,
+            ).strip()
+            candidate = candidate.strip('"').strip("'").strip()
+            if not candidate:
+                continue
+            lower = candidate.lower()
+            leak_markers = (
+                "you are a",
+                "system prompt",
+                "rules:",
+                "self-correction examples",
+                "as an ai",
+                "this version is concise",
+                "this version is",
+                "directly addresses the question",
+                "refined version",
+                "rewritten version",
+                "concise and directly",
+            )
+            if any(marker in lower for marker in leak_markers):
+                continue
+            return candidate
+        return ""
 
-        lower = candidate.lower()
-        leak_markers = (
-            "you are a",
-            "system prompt",
-            "rules:",
-            "self-correction examples",
-            "as an ai",
-            "this version is concise",
-            "this version is",
-        )
-        if any(marker in lower for marker in leak_markers):
-            return ""
-        return candidate
+    @staticmethod
+    def _looks_like_question(text: str) -> bool:
+        stripped = text.strip()
+        return stripped.endswith("?") or bool(_QUESTION_START_RE.match(stripped))
+
+    @staticmethod
+    def _keywords(text: str) -> set[str]:
+        tokens = [tok.lower() for tok in _TOKEN_RE.findall(text)]
+        return {
+            token
+            for token in tokens
+            if len(token) > 2 and token not in _COMMON_WORDS
+        }
+
+    @classmethod
+    def _is_answer_like(cls, source: str, candidate: str) -> bool:
+        """Detect when model output drifts into generated answers."""
+        source_words = source.split()
+        candidate_words = candidate.split()
+        if len(candidate_words) > max((len(source_words) * 2), len(source_words) + 12):
+            return True
+
+        lower_candidate = candidate.strip().lower()
+        if lower_candidate.startswith(("answer:", "response:", "explanation:")):
+            return True
+        if _ASSISTANTY_START_RE.match(candidate) and not _ASSISTANTY_START_RE.match(source):
+            return True
+
+        source_is_question = cls._looks_like_question(source)
+        candidate_is_question = cls._looks_like_question(candidate)
+        if source_is_question:
+            if _ANSWER_START_RE.match(lower_candidate):
+                return True
+            # Preserve question intent; avoid converting spoken questions into answers.
+            if not candidate_is_question and not _QUESTION_START_RE.match(lower_candidate):
+                return True
+
+        source_keywords = cls._keywords(source)
+        candidate_keywords = cls._keywords(candidate)
+        if candidate_keywords:
+            new_tokens = candidate_keywords - source_keywords
+            novelty_ratio = len(new_tokens) / len(candidate_keywords)
+            if novelty_ratio > 0.45 and len(candidate_keywords) >= 6:
+                return True
+        return False

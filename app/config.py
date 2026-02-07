@@ -12,8 +12,28 @@ CONFIG_PATH = APP_SUPPORT_DIR / "config.json"
 
 DEFAULT_WHISPER_MODEL = "mlx-community/whisper-large-v3-turbo"
 DEFAULT_MAX_ACCURACY_MODEL = "mlx-community/whisper-large-v3-mlx"
+DEFAULT_LLM_MODEL = "mlx-community/Qwen2.5-3B-Instruct-4bit"
+DEFAULT_LANGUAGE = "auto"
 _INVALID_MODEL_ALIASES = {
     "mlx-community/whisper-large-v3",
+}
+_LLM_MODEL_ALIASES = {
+    # Requested 4B Minitron variants are not published on MLX; map to stable <4B.
+    "mlx-community/Mistral-NeMo-Minitron-4B-Instruct": DEFAULT_LLM_MODEL,
+    "mlx-community/Mistral-NeMo-Minitron-4B-Instruct-4bit": DEFAULT_LLM_MODEL,
+    "nvidia/Mistral-NeMo-Minitron-4B-Instruct": DEFAULT_LLM_MODEL,
+    "mlx-community/Mistral-NeMo-Minitron-8B-Instruct-4bit": DEFAULT_LLM_MODEL,
+}
+_LANGUAGE_ALIASES = {
+    "en": "en",
+    "english": "en",
+    "de": "de",
+    "deutsch": "de",
+    "german": "de",
+    "auto": "auto",
+    "multilingual": "auto",
+    "english_german": "auto",
+    "en_de": "auto",
 }
 
 
@@ -24,9 +44,9 @@ class AppConfig:
     silence_duration_ms: int = 700
     vad_threshold: float = 0.5
     whisper_model: str = DEFAULT_WHISPER_MODEL
-    language: str = "en"
+    language: str = DEFAULT_LANGUAGE
     cleanup_mode: str = "standard"
-    llm_model: str = "mlx-community/Qwen2.5-1.5B-Instruct-4bit"
+    llm_model: str = DEFAULT_LLM_MODEL
     restore_clipboard: bool = True
     dictionary_path: str = ""
     max_accuracy_whisper_model: str = DEFAULT_MAX_ACCURACY_MODEL
@@ -41,6 +61,12 @@ class AppConfig:
             or self.max_accuracy_whisper_model in _INVALID_MODEL_ALIASES
         ):
             self.max_accuracy_whisper_model = DEFAULT_MAX_ACCURACY_MODEL
+        self.language = _LANGUAGE_ALIASES.get(
+            str(self.language).strip().lower(), DEFAULT_LANGUAGE
+        )
+        if not self.llm_model:
+            self.llm_model = DEFAULT_LLM_MODEL
+        self.llm_model = _LLM_MODEL_ALIASES.get(self.llm_model, self.llm_model)
 
     @classmethod
     def load(cls) -> AppConfig:
@@ -52,9 +78,12 @@ class AppConfig:
                 filtered = {k: v for k, v in data.items() if k in known_fields}
                 config = cls(**filtered)
                 # Persist automatic migrations (e.g., deprecated model IDs).
-                if filtered.get("whisper_model") != config.whisper_model or filtered.get(
-                    "max_accuracy_whisper_model"
-                ) != config.max_accuracy_whisper_model:
+                if (
+                    filtered.get("whisper_model") != config.whisper_model
+                    or filtered.get("max_accuracy_whisper_model")
+                    != config.max_accuracy_whisper_model
+                    or filtered.get("llm_model") != config.llm_model
+                ):
                     config.save()
                 return config
             except (json.JSONDecodeError, TypeError, ValueError) as e:

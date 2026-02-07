@@ -11,12 +11,23 @@ APP_NAME="VoiceFlow"
 DIST="$ROOT/dist"
 BUILD="$ROOT/build"
 APP="$DIST/$APP_NAME.app"
+DMG="$DIST/$APP_NAME.dmg"
 
 echo "==> Cleaning previous builds..."
 rm -rf "$DIST" "$BUILD"
 
 echo "==> Building $APP_NAME.app with PyInstaller..."
-pyinstaller VoiceFlow.spec --noconfirm 2>&1
+PYI_CMD=""
+if command -v pyinstaller >/dev/null 2>&1; then
+    PYI_CMD="pyinstaller"
+elif [ -x "$ROOT/.venv/bin/pyinstaller" ]; then
+    PYI_CMD="$ROOT/.venv/bin/pyinstaller"
+else
+    echo "ERROR: PyInstaller not found. Install it in PATH or at $ROOT/.venv/bin/pyinstaller"
+    exit 1
+fi
+
+"$PYI_CMD" VoiceFlow.spec --noconfirm 2>&1
 
 # ── Verify bundle structure ──────────────────────────────────
 echo ""
@@ -64,12 +75,13 @@ fi
 echo ""
 echo "==> $APP_NAME.app built successfully at: $APP"
 
-# ── Optional DMG creation ────────────────────────────────────
+# ── DMG creation ───────────────────────────────────────────────
+echo ""
+echo "==> Creating DMG installer..."
+rm -f "$DMG"
+
 if command -v create-dmg &>/dev/null; then
-    DMG="$DIST/$APP_NAME.dmg"
-    echo ""
-    echo "==> Creating DMG installer..."
-    create-dmg \
+    if create-dmg \
         --volname "$APP_NAME" \
         --window-pos 200 120 \
         --window-size 600 400 \
@@ -78,12 +90,26 @@ if command -v create-dmg &>/dev/null; then
         --app-drop-link 450 190 \
         --no-internet-enable \
         "$DMG" \
-        "$APP"
-    echo "==> DMG created at: $DMG"
-else
-    echo ""
-    echo "NOTE: Install 'create-dmg' (brew install create-dmg) to auto-generate a DMG."
-    echo "      For now, you can run the app directly: open \"$APP\""
+        "$APP"; then
+        echo "==> DMG created at: $DMG"
+    else
+        echo "WARN: create-dmg failed; falling back to hdiutil DMG generation."
+        rm -f "$DMG"
+    fi
+fi
+
+if [ ! -f "$DMG" ]; then
+    STAGING="$(mktemp -d "$BUILD/dmg-staging.XXXXXX")"
+    cp -R "$APP" "$STAGING/"
+    ln -s /Applications "$STAGING/Applications"
+    hdiutil create \
+        -volname "$APP_NAME" \
+        -srcfolder "$STAGING" \
+        -ov \
+        -format UDZO \
+        "$DMG" >/dev/null
+    rm -rf "$STAGING"
+    echo "==> DMG created at: $DMG (hdiutil fallback)"
 fi
 
 echo ""

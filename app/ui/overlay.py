@@ -25,10 +25,11 @@ _CORNER_RADIUS = _PILL_HEIGHT / 2
 _ICON_DIAMETER = 22
 _ICON_LEFT_PADDING = 14
 
-_LABEL_FONT_SIZE = 14.0
+_LABEL_FONT_SIZE = 13.0
 
-_FADE_DURATION = 0.25
+_FADE_DURATION = 0.2
 _PULSE_DURATION = 1.0
+_LIFT_PIXELS = 6.0
 
 
 def _main_screen_frame() -> AppKit.NSRect:
@@ -61,6 +62,7 @@ class RecordingOverlay:
         self._dot_view: AppKit.NSView | None = None
         self._ring_layer: Quartz.CALayer | None = None
         self._spinner: AppKit.NSProgressIndicator | None = None
+        self._container_layer: Quartz.CALayer | None = None
         self._built = False
 
     # ------------------------------------------------------------------
@@ -118,6 +120,14 @@ class RecordingOverlay:
             vibrancy.setWantsLayer_(True)
             vibrancy.layer().setCornerRadius_(_CORNER_RADIUS)
             vibrancy.layer().setMasksToBounds_(True)
+            vibrancy.layer().setBorderWidth_(0.8)
+            vibrancy.layer().setBorderColor_(
+                AppKit.NSColor.colorWithCalibratedWhite_alpha_(1.0, 0.18).CGColor()
+            )
+            vibrancy.layer().setShadowColor_(AppKit.NSColor.blackColor().CGColor())
+            vibrancy.layer().setShadowOpacity_(0.22)
+            vibrancy.layer().setShadowRadius_(12.0)
+            vibrancy.layer().setShadowOffset_(AppKit.NSMakeSize(0, -3))
             panel.contentView().addSubview_(vibrancy)
             container = vibrancy
         except Exception:
@@ -125,12 +135,17 @@ class RecordingOverlay:
             solid = AppKit.NSView.alloc().initWithFrame_(content_frame)
             solid.setWantsLayer_(True)
             solid.layer().setBackgroundColor_(
-                AppKit.NSColor.colorWithCalibratedWhite_alpha_(0.1, 0.85).CGColor()
+                AppKit.NSColor.colorWithCalibratedWhite_alpha_(0.09, 0.9).CGColor()
             )
             solid.layer().setCornerRadius_(_CORNER_RADIUS)
             solid.layer().setMasksToBounds_(True)
+            solid.layer().setBorderWidth_(0.8)
+            solid.layer().setBorderColor_(
+                AppKit.NSColor.colorWithCalibratedWhite_alpha_(1.0, 0.16).CGColor()
+            )
             panel.contentView().addSubview_(solid)
             container = solid
+        self._container_layer = container.layer()
 
         # --- red dot (recording indicator) ---
         dot_y = (_PILL_HEIGHT - _ICON_DIAMETER) / 2
@@ -145,6 +160,10 @@ class RecordingOverlay:
         )
         dot_layer.setCornerRadius_(_ICON_DIAMETER / 2)
         dot_layer.setMasksToBounds_(False)
+        dot_layer.setShadowColor_(AppKit.NSColor.systemRedColor().CGColor())
+        dot_layer.setShadowOpacity_(0.4)
+        dot_layer.setShadowRadius_(6.0)
+        dot_layer.setShadowOffset_(AppKit.NSMakeSize(0, 0))
         ring_layer = Quartz.CALayer.layer()
         ring_layer.setFrame_(dot_view.bounds())
         ring_layer.setBorderWidth_(2.0)
@@ -156,10 +175,10 @@ class RecordingOverlay:
         dot_layer.addSublayer_(ring_layer)
         self._ring_layer = ring_layer
 
-        # Prefer a microphone glyph over a plain dot.
+        # Prefer waveform glyph over a generic icon.
         try:
             symbol = AppKit.NSImage.imageWithSystemSymbolName_accessibilityDescription_(
-                "mic.fill", "Recording"
+                "waveform", "Recording"
             )
             if symbol is not None:
                 icon_view = AppKit.NSImageView.alloc().initWithFrame_(
@@ -190,19 +209,20 @@ class RecordingOverlay:
         # --- label ---
         label_x = _ICON_LEFT_PADDING + _ICON_DIAMETER + 12
         label_width = _PILL_WIDTH - label_x - 14
-        label_height = 20
-        label_y = (_PILL_HEIGHT - label_height) / 2
+        label_height = 18
+        label_y = (_PILL_HEIGHT - label_height) / 2 + 0.5
         label_frame = AppKit.NSMakeRect(label_x, label_y, label_width, label_height)
         label = AppKit.NSTextField.labelWithString_("Recording")
         label.setFrame_(label_frame)
         label.setFont_(
             AppKit.NSFont.systemFontOfSize_weight_(
-                _LABEL_FONT_SIZE, AppKit.NSFontWeightSemibold
+                _LABEL_FONT_SIZE, AppKit.NSFontWeightMedium
             )
         )
         label.setTextColor_(AppKit.NSColor.whiteColor())
         label.setAlignment_(AppKit.NSTextAlignmentLeft)
         label.setLineBreakMode_(AppKit.NSLineBreakByTruncatingTail)
+        label.setUsesSingleLineMode_(True)
         container.addSubview_(label)
         self._label = label
 
@@ -290,6 +310,7 @@ class RecordingOverlay:
             AppKit.NSAnimationContext.currentContext().setDuration_(_FADE_DURATION)
             self._panel.animator().setAlphaValue_(1.0)
             AppKit.NSAnimationContext.endGrouping()
+            self._animate_entrance()
         except Exception:
             # Fallback: set alpha directly without animation
             log.debug("Animation fallback: setting alpha directly")
@@ -304,10 +325,36 @@ class RecordingOverlay:
             AppKit.NSAnimationContext.currentContext().setDuration_(_FADE_DURATION)
             self._panel.animator().setAlphaValue_(0.0)
             AppKit.NSAnimationContext.endGrouping()
+            if self._container_layer is not None:
+                self._container_layer.removeAnimationForKey_("overlayEntrance")
         except Exception:
             log.debug("Animation fallback: setting alpha directly")
             if self._panel is not None:
                 self._panel.setAlphaValue_(0.0)
+
+    def _animate_entrance(self) -> None:
+        if self._container_layer is None:
+            return
+        try:
+            scale = Quartz.CABasicAnimation.animationWithKeyPath_("transform.scale")
+            scale.setFromValue_(0.965)
+            scale.setToValue_(1.0)
+            scale.setDuration_(0.22)
+            lift = Quartz.CABasicAnimation.animationWithKeyPath_("transform.translation.y")
+            lift.setFromValue_(-_LIFT_PIXELS)
+            lift.setToValue_(0.0)
+            lift.setDuration_(0.22)
+            group = Quartz.CAAnimationGroup.animation()
+            group.setAnimations_([scale, lift])
+            group.setDuration_(0.22)
+            group.setTimingFunction_(
+                Quartz.CAMediaTimingFunction.functionWithName_(
+                    Quartz.kCAMediaTimingFunctionEaseOut
+                )
+            )
+            self._container_layer.addAnimation_forKey_(group, "overlayEntrance")
+        except Exception:
+            log.debug("Overlay entrance animation failed (non-fatal)")
 
     def _start_pulse(self) -> None:
         if self._dot_layer is None:

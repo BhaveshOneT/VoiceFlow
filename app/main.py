@@ -100,6 +100,16 @@ class VoiceFlowApp(rumps.App):
         accuracy_menu = rumps.MenuItem("Accuracy Mode")
         accuracy_menu.update([self._fast_item, self._standard_item, self._max_item])
 
+        self._lang_auto_item = rumps.MenuItem(
+            "Auto (English + German)", callback=self._set_language_auto
+        )
+        self._lang_en_item = rumps.MenuItem("English", callback=self._set_language_en)
+        self._lang_de_item = rumps.MenuItem("German", callback=self._set_language_de)
+        language_menu = rumps.MenuItem("Transcription Language")
+        language_menu.update(
+            [self._lang_auto_item, self._lang_en_item, self._lang_de_item]
+        )
+
         super().__init__(
             name="VoiceFlow",
             title="VF ...",
@@ -111,6 +121,7 @@ class VoiceFlowApp(rumps.App):
                 self._microphone_item,
                 None,  # separator
                 accuracy_menu,
+                language_menu,
                 None,  # separator
             ],
             quit_button="Quit VoiceFlow",
@@ -118,6 +129,7 @@ class VoiceFlowApp(rumps.App):
 
         # Mark the current accuracy mode
         self._sync_mode_checkmarks()
+        self._sync_language_checkmarks()
 
         # -- Audio & pipeline --------------------------------------------------
         self.audio = AudioCapture()
@@ -342,20 +354,62 @@ class VoiceFlowApp(rumps.App):
         self._standard_item.state = mode == "standard"
         self._max_item.state = mode == "max_accuracy"
 
+    def _set_language_auto(self, sender: rumps.MenuItem) -> None:
+        self._switch_language("auto")
+
+    def _set_language_en(self, sender: rumps.MenuItem) -> None:
+        self._switch_language("en")
+
+    def _set_language_de(self, sender: rumps.MenuItem) -> None:
+        self._switch_language("de")
+
+    def _switch_language(self, language: str) -> None:
+        old_language = self.config.language
+        if old_language == language:
+            return
+        log.info("Switching transcription language to %s", language)
+        try:
+            self.pipeline.set_language(language)
+        except Exception as exc:
+            log.exception("Failed to switch language to %s", language)
+            self.config.language = old_language
+            self.config.save()
+            self._sync_language_checkmarks()
+            self._show_error(
+                title="Language switch failed",
+                message=f"{exc}",
+            )
+            return
+        self.config.language = language
+        self.config.save()
+        self._sync_language_checkmarks()
+        label = {
+            "auto": "Auto (EN+DE)",
+            "en": "English",
+            "de": "German",
+        }.get(language, language)
+        self._set_status(f"Language: {label}")
+
+    def _sync_language_checkmarks(self) -> None:
+        lang = self.config.language
+        self._lang_auto_item.state = lang == "auto"
+        self._lang_en_item.state = lang == "en"
+        self._lang_de_item.state = lang == "de"
+
     # ======================================================================
     # Model warm-up (background thread at startup)
     # ======================================================================
 
     def _warm_up_models(self) -> None:
-        """Load and warm up all models, then start the hotkey listener."""
-        self._set_status("Loading models...")
+        """Warm up Whisper first so recording can start quickly; load LLM in background."""
+        self._set_status("Loading speech model...")
         try:
-            self.pipeline.warm_up()
+            self.pipeline.warm_up_for_realtime()
         except Exception:
-            log.exception("Failed to warm up models")
+            log.exception("Failed to warm up speech model")
             self._show_error(
                 title="Model load failed",
-                message="Failed to warm up models. Check model downloads.",
+                message="Failed to warm up speech model. Check model downloads.",
             )
             return
 
@@ -399,6 +453,23 @@ class VoiceFlowApp(rumps.App):
         self._set_status("Ready")
         self._set_title("VF")
         log.info("VoiceFlow ready")
+
+        # Load the optional LLM refiner in background so startup/hotkey
+        # availability is not blocked by large model download/load.
+        if self.pipeline.refiner and not self.pipeline.refiner.loaded:
+            threading.Thread(target=self._warm_up_refiner_background, daemon=True).start()
+
+    def _warm_up_refiner_background(self) -> None:
+        try:
+            self.pipeline.warm_up_refiner()
+            self._notify(
+                title="VoiceFlow",
+                subtitle="Refiner ready",
+                message="Enhanced post-processing model is now loaded.",
+            )
+        except Exception:
+            # Non-fatal: app remains fully usable with deterministic cleanup.
+            log.exception("Background LLM warm-up failed (continuing without refiner)")
 
     # ======================================================================
     # Cleanup

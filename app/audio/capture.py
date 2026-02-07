@@ -1,6 +1,7 @@
 """Real-time microphone capture using sounddevice."""
 
 import logging
+import time
 
 import numpy as np
 import sounddevice as sd
@@ -19,6 +20,7 @@ class AudioCapture:
 
     SAMPLE_RATE = 16000
     BLOCK_SIZE = 512  # ~32ms at 16kHz
+    TRAILING_CAPTURE_MS = 220  # capture a brief tail after key-up
 
     def __init__(self, sample_rate: int = SAMPLE_RATE, block_size: int = BLOCK_SIZE):
         self.sample_rate = sample_rate
@@ -39,10 +41,16 @@ class AudioCapture:
         )
         self._stream.start()
 
-    def stop(self) -> np.ndarray:
-        """Stop recording and return all remaining audio concatenated."""
+    def stop(self, trailing_capture_ms: int = TRAILING_CAPTURE_MS) -> np.ndarray:
+        """Stop recording and return all remaining audio concatenated.
+
+        A short tail capture window helps avoid clipping the final words when
+        users release the hotkey while still finishing a phrase.
+        """
         if self._stream is not None:
             try:
+                if trailing_capture_ms > 0:
+                    time.sleep(trailing_capture_ms / 1000.0)
                 self._stream.stop()
                 self._stream.close()
             except Exception as e:

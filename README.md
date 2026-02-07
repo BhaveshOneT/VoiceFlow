@@ -1,98 +1,82 @@
 # VoiceFlow
 
-Local AI dictation for macOS. Hold a key, speak, release — your words appear as text in any app. All processing happens on-device using Apple Silicon ML acceleration.
+Local dictation app for macOS (Apple Silicon).  
+Hold `Right Cmd`, speak, release, and VoiceFlow inserts cleaned text into the focused app.
 
-## Install
+## What It Does
 
-### Option A: Pre-built App (non-technical users)
+- Real-time speech-to-text with local Whisper (`mlx-whisper`)
+- Smart post-processing with local LLM (`Qwen2.5-3B-4bit`)
+- Built-in cleanup for filler words and self-corrections (`"no no", "sorry", "I mean"`)
+- File mention tagging, for example:
+  - `"update function.py file"` -> `@ function.py`
+  - `"modify text refiner file"` -> `@ text_refiner`
+- Language modes:
+  - `Auto (English + German)`
+  - `English`
+  - `German`
 
-1. Download `VoiceFlow.dmg` from the latest release
-2. Open the DMG and drag **VoiceFlow** to your Applications folder
-3. Launch VoiceFlow from Applications
-4. Grant **Microphone** and **Accessibility** permissions when prompted
-5. On first launch, models will download automatically (~2 GB one-time download)
+## Install (Team / Non-Technical)
 
-### Option B: From Source (developers)
+1. Download `VoiceFlow.dmg` from Releases.
+2. Open the DMG.
+3. Drag `VoiceFlow.app` into `Applications`.
+4. Launch `VoiceFlow` from `Applications`.
+5. Grant permissions when prompted:
+   - Microphone
+   - Accessibility
+
+After that, hold `Right Cmd` and dictate in any text field.
+
+## Build From Source
 
 ```bash
-git clone <repo-url> && cd wisprflow-clone
-python -m venv .venv && source .venv/bin/activate
+git clone https://github.com/BhaveshOneT/VoiceFlow.git
+cd VoiceFlow
+python3 -m venv .venv
+source .venv/bin/activate
 pip install -e .
-voiceflow
-```
-
-### Building the .app
-
-```bash
-pip install pyinstaller
 ./scripts/build.sh
-# Output: dist/VoiceFlow.app
 ```
 
-Install `create-dmg` (`brew install create-dmg`) to auto-generate a DMG installer with drag-to-Applications.
+Build outputs:
 
-## Usage
+- `dist/VoiceFlow.app`
+- `dist/VoiceFlow.dmg`
 
-1. **Hold Right Cmd** (default) to start recording — a floating pill appears at the bottom of your screen
-2. **Speak** your text naturally
-3. **Release** to transcribe and insert text at your cursor
+`build.sh` creates a DMG even without `create-dmg` by falling back to `hdiutil`.
 
-The overlay shows:
-- **Recording** (pulsing red dot) — capturing audio
-- **Processing...** — transcribing and refining
-- Hidden — idle, ready for next dictation
+## Runtime Notes
 
-### Accuracy Modes
-
-Click the **VF** menu bar icon to switch modes:
-
-| Mode | Speed | Quality | Uses |
-|------|-------|---------|------|
-| Fast | ~1s | Good | Quick notes, messages |
-| Standard | ~2s | Better | Code comments, docs |
-| Max Accuracy | ~3s | Best | Precise technical dictation |
-
-### Self-Correction
-
-VoiceFlow's LLM understands natural self-corrections. No need to start over:
-
-| You say | VoiceFlow types |
-|---------|----------------|
-| "change it to red, sorry, blue" | "change it to blue" |
-| "call the function foo, actually bar" | "call the function bar" |
-| "set font size to 12, no wait, 14 pixels" | "set the font size to 14 pixels" |
-| "delete the file, scratch that, just rename it" | "just rename it" |
-
-Supported correction phrases: "sorry", "I mean", "actually", "no wait", "scratch that", "never mind that", "let me rephrase", "correction".
-
-### Custom Vocabulary
-
-Edit `~/.voiceflow/dictionary.json` to add domain-specific terms:
-
-```json
-{
-  "pie torch": "PyTorch",
-  "cuda": "CUDA",
-  "j query": "jQuery"
-}
-```
+- Hotkey becomes available as soon as the speech model is ready.
+- LLM refiner loads in background and does not block recording startup.
+- First launch may download model files to `~/.cache/huggingface/`.
 
 ## Troubleshooting
 
-**"Accessibility Permission Required" notification**
-Open System Settings > Privacy & Security > Accessibility > enable VoiceFlow. Restart the app.
+### Right Cmd does nothing
 
-**No text appears after dictation**
-Ensure the target app accepts keyboard input. Some apps require Accessibility permission for VoiceFlow to insert text.
+- Enable Accessibility:
+  - `System Settings -> Privacy & Security -> Accessibility`
+- Quit and relaunch VoiceFlow.
 
-**Models downloading on every launch**
-Models are cached in `~/.cache/huggingface/`. Ensure this directory is writable and has ~2 GB free space.
+### No text inserted
 
-**Build fails with missing `mlx_whisper` assets**
-The `VoiceFlow.spec` includes `mlx_whisper/assets` as data files. Ensure `mlx-whisper` is installed: `pip install mlx-whisper`.
+- Keep VoiceFlow in Accessibility list and enabled.
+- Some apps block synthetic paste in secure fields.
+
+### Models keep downloading
+
+- Ensure `~/.cache/huggingface/` is writable.
+- Ensure enough free disk space.
+
+### Logs
+
+Log file:
+
+`~/Library/Application Support/VoiceFlow/logs/voiceflow.log`
 
 ## Requirements
 
-- macOS 13.0+
-- Apple Silicon (M1/M2/M3/M4)
-- ~2 GB disk space for models (downloaded on first launch)
+- macOS 13+
+- Apple Silicon (`M1`, `M2`, `M3`, `M4`)

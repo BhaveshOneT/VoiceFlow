@@ -31,6 +31,17 @@ class TextInserter:
     RESTORE_DELAY = 0.05  # 50ms before restoring clipboard
 
     @staticmethod
+    def is_accessibility_trusted() -> bool:
+        """Return whether macOS Accessibility permission is granted."""
+        if AXIsProcessTrusted is None:
+            return True
+        try:
+            return bool(AXIsProcessTrusted())
+        except Exception as exc:
+            log.warning("Accessibility check failed: %s", exc)
+            return True
+
+    @staticmethod
     def insert(text: str, restore_clipboard: bool = True) -> bool:
         """Insert text at current cursor position.
 
@@ -40,17 +51,6 @@ class TextInserter:
         if not text:
             return True
 
-        if AXIsProcessTrusted is not None:
-            try:
-                if not AXIsProcessTrusted():
-                    TextInserter._set_clipboard(text)
-                    TextInserter.last_error = (
-                        "Accessibility permission required for paste"
-                    )
-                    return False
-            except Exception as exc:
-                log.warning("Accessibility check failed: %s", exc)
-
         original: Optional[str] = None
         if restore_clipboard:
             original = TextInserter._get_clipboard()
@@ -58,6 +58,13 @@ class TextInserter:
         try:
             TextInserter._set_clipboard(text)
             time.sleep(TextInserter.SETTLE_DELAY)
+
+            if not TextInserter.is_accessibility_trusted():
+                TextInserter.last_error = (
+                    "Accessibility permission required for paste. "
+                    "Text has been copied to your clipboard."
+                )
+                return False
 
             TextInserter._simulate_paste()
             time.sleep(TextInserter.PASTE_DELAY)

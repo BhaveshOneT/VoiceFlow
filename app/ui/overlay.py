@@ -93,8 +93,6 @@ class RecordingOverlay:
         panel.setOpaque_(False)
         panel.setBackgroundColor_(AppKit.NSColor.clearColor())
         panel.setIgnoresMouseEvents_(True)
-        panel.setCanBecomeKeyWindow_(False)
-        panel.setCanBecomeMainWindow_(False)
         panel.setHidesOnDeactivate_(False)
         panel.setFloatingPanel_(True)
         panel.setHasShadow_(True)

@@ -118,10 +118,46 @@ class TranscriptionPipeline:
 
     def warm_up(self) -> None:
         """Load and warm up all models."""
-        self.whisper.warm_up()
+        self._warm_up_whisper_with_fallback()
         if self.refiner:
             self.refiner.load()
             log.info("LLM loaded and ready")
+
+    def _warm_up_whisper_with_fallback(self) -> None:
+        """Warm up the active Whisper model and fall back when max-accuracy is unavailable."""
+        primary_error: Exception | None = None
+        try:
+            self.whisper.warm_up()
+            return
+        except Exception as exc:
+            primary_error = exc
+            log.exception(
+                "Whisper warm-up failed for model %s", self.whisper.model_name
+            )
+
+        fallback_model = self.config.whisper_model
+        if self.whisper.model_name == fallback_model:
+            raise RuntimeError(
+                f"Whisper warm-up failed for model '{self.whisper.model_name}'"
+            ) from primary_error
+
+        log.warning("Retrying warm-up with fallback model %s", fallback_model)
+        fallback_engine = WhisperEngine(
+            model_name=fallback_model,
+            language=self.config.language,
+        )
+        try:
+            fallback_engine.warm_up()
+            self.whisper = fallback_engine
+            log.warning(
+                "Warm-up fallback succeeded; using model %s", fallback_model
+            )
+        except Exception as fallback_error:
+            raise RuntimeError(
+                f"Whisper warm-up failed on primary model "
+                f"'{self.config.max_accuracy_whisper_model}' and fallback "
+                f"'{fallback_model}'"
+            ) from fallback_error
 
     def set_cleanup_mode(self, mode: str) -> None:
         """Switch cleanup mode at runtime."""
@@ -140,7 +176,7 @@ class TranscriptionPipeline:
                 model_name=new_model,
                 language=self.config.language,
             )
-            self.whisper.warm_up()
+            self._warm_up_whisper_with_fallback()
 
         # Handle LLM refiner
         if mode == "fast" and self.refiner:

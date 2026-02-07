@@ -49,10 +49,23 @@ _MIN_AUDIO_SAMPLES = 4800
 
 
 def _check_accessibility() -> bool:
-    """Return True if the app has Accessibility permission."""
+    """Return True if the app has Accessibility permission.
+
+    Also triggers the macOS trust prompt when available.
+    """
     try:
-        from ApplicationServices import AXIsProcessTrusted  # type: ignore[import-untyped]
-        trusted = AXIsProcessTrusted()
+        from ApplicationServices import (  # type: ignore[import-untyped]
+            AXIsProcessTrusted,
+            AXIsProcessTrustedWithOptions,
+            kAXTrustedCheckOptionPrompt,
+        )
+        trusted = bool(AXIsProcessTrusted())
+        if not trusted:
+            try:
+                AXIsProcessTrustedWithOptions({kAXTrustedCheckOptionPrompt: True})
+                trusted = bool(AXIsProcessTrusted())
+            except Exception:
+                pass
         log.info("Accessibility check: trusted=%s", trusted)
         return trusted
     except ImportError:
@@ -224,6 +237,20 @@ class VoiceFlowApp(rumps.App):
         inserted = TextInserter.insert(result, self.config.restore_clipboard)
         if not inserted:
             detail = TextInserter.last_error or "Paste failed"
+            if "Accessibility permission required" in detail:
+                self.overlay.hide()
+                self._set_title("VF")
+                self._set_status("Paste permission required")
+                self._notify(
+                    title="Paste Permission Required",
+                    subtitle="VoiceFlow copied text to clipboard",
+                    message=(
+                        "Enable Accessibility for VoiceFlow to auto-paste. "
+                        "You can paste now with Command+V."
+                    ),
+                )
+                self._open_system_settings("Privacy_Accessibility")
+                return
             self._show_error(title="Paste failed", message=detail)
             return
 
@@ -284,12 +311,28 @@ class VoiceFlowApp(rumps.App):
         self._switch_mode("max_accuracy")
 
     def _switch_mode(self, mode: str) -> None:
-        if self.config.cleanup_mode == mode:
+        old_mode = self.config.cleanup_mode
+        if old_mode == mode:
             return
         log.info("Switching accuracy mode to %s", mode)
+        try:
+            self.pipeline.set_cleanup_mode(mode)
+        except Exception as exc:
+            log.exception("Failed to switch accuracy mode to %s", mode)
+            self.config.cleanup_mode = old_mode
+            self.config.save()
+            try:
+                self.pipeline.set_cleanup_mode(old_mode)
+            except Exception:
+                log.exception("Failed to restore previous accuracy mode %s", old_mode)
+            self._sync_mode_checkmarks()
+            self._show_error(
+                title="Mode switch failed",
+                message=f"{exc}",
+            )
+            return
         self.config.cleanup_mode = mode
         self.config.save()
-        self.pipeline.set_cleanup_mode(mode)
         self._sync_mode_checkmarks()
         self._set_status(f"{mode.replace('_', ' ').title()} mode")
 
@@ -315,6 +358,23 @@ class VoiceFlowApp(rumps.App):
                 message="Failed to warm up models. Check model downloads.",
             )
             return
+
+        active_whisper_model = self.pipeline.whisper.model_name
+        if (
+            self.config.cleanup_mode == "max_accuracy"
+            and active_whisper_model != self.config.max_accuracy_whisper_model
+        ):
+            self._notify(
+                title="Max Accuracy Fallback",
+                subtitle="VoiceFlow is using fallback Whisper model",
+                message=(
+                    f"Configured model unavailable; using {active_whisper_model}."
+                ),
+            )
+            log.warning(
+                "Configured max accuracy model unavailable; using fallback model %s",
+                active_whisper_model,
+            )
 
         # Check Accessibility permission (needed for hotkeys + text insertion)
         try:

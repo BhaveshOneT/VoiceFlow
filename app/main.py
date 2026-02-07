@@ -8,6 +8,7 @@ from pathlib import Path
 
 import numpy as np
 import rumps
+from PyObjCTools import AppHelper
 
 from app.config import AppConfig
 from app.dictionary import Dictionary
@@ -133,7 +134,7 @@ class VoiceFlowApp(rumps.App):
                 message="Unable to start audio capture. Check microphone permission.",
             )
             return
-        self.title = "VF \u25cf"  # bullet
+        self._set_title("VF \u25cf")  # bullet
         self._set_status("Recording")
         self.overlay.show_recording()
 
@@ -150,21 +151,21 @@ class VoiceFlowApp(rumps.App):
 
         if cancelled:
             log.info("Recording cancelled (hold too short)")
-            self.title = "VF"
+            self._set_title("VF")
             self._set_status("Ready")
             self.overlay.hide()
             return
 
         if audio.size < _MIN_AUDIO_SAMPLES:
             log.info("Audio too short (%d samples); discarding", audio.size)
-            self.title = "VF"
+            self._set_title("VF")
             self._set_status("Ready")
             self.overlay.hide()
             return
 
         log.info("Recording stopped; captured %d samples (%.1fs)",
                  audio.size, audio.size / AudioCapture.SAMPLE_RATE)
-        self.title = "VF ..."
+        self._set_title("VF ...")
         self._set_status("Processing")
         self.overlay.show_processing()
         with self._lock:
@@ -196,7 +197,7 @@ class VoiceFlowApp(rumps.App):
 
         if not result:
             log.info("Pipeline returned empty result (no speech detected)")
-            self.title = "VF"
+            self._set_title("VF")
             self._set_status("Ready")
             self.overlay.hide()
             return
@@ -208,12 +209,12 @@ class VoiceFlowApp(rumps.App):
             self._show_error(title="Paste failed", message=detail)
             return
 
-        self.title = "VF"
+        self._set_title("VF")
         self._set_status("Ready")
         self.overlay.hide()
 
     def _reset_title(self) -> None:
-        self.title = "VF"
+        self._set_title("VF")
 
     # ======================================================================
     # Test Recording (manual trigger from menu, bypasses hotkey)
@@ -230,7 +231,7 @@ class VoiceFlowApp(rumps.App):
 
         # Show overlay immediately
         self.overlay.show_recording()
-        self.title = "VF \u25cf"
+        self._set_title("VF \u25cf")
         self._set_status("Recording")
         try:
             self.audio.drain()
@@ -247,8 +248,7 @@ class VoiceFlowApp(rumps.App):
             import time
             time.sleep(3)
             log.info("Test recording: stopping after 3s")
-            # Dispatch stop to main thread context
-            self._on_recording_stop(cancelled=False)
+            AppHelper.callAfter(self._on_recording_stop, False)
 
         threading.Thread(target=_stop_after_delay, daemon=True).start()
 
@@ -273,7 +273,7 @@ class VoiceFlowApp(rumps.App):
         self.config.save()
         self.pipeline.set_cleanup_mode(mode)
         self._sync_mode_checkmarks()
-        self._status_item.title = f"Status: {mode.replace('_', ' ').title()} mode"
+        self._set_status(f"{mode.replace('_', ' ').title()} mode")
 
     def _sync_mode_checkmarks(self) -> None:
         mode = self.config.cleanup_mode
@@ -287,7 +287,7 @@ class VoiceFlowApp(rumps.App):
 
     def _warm_up_models(self) -> None:
         """Load and warm up all models, then start the hotkey listener."""
-        self._status_item.title = "Status: Loading models..."
+        self._set_status("Loading models...")
         try:
             self.pipeline.warm_up()
         except Exception:
@@ -302,8 +302,8 @@ class VoiceFlowApp(rumps.App):
         try:
             if not _check_accessibility():
                 log.warning("Accessibility permission not granted")
-                self._status_item.title = "Status: Accessibility required"
-                rumps.notification(
+                self._set_status("Accessibility required")
+                self._notify(
                     title="Accessibility Permission Required",
                     subtitle="VoiceFlow needs Accessibility access",
                     message=(
@@ -318,8 +318,8 @@ class VoiceFlowApp(rumps.App):
         self.hotkey.start()
         log.info("Hotkey listener start requested")
 
-        self._status_item.title = "Status: Ready"
-        self.title = "VF"
+        self._set_status("Ready")
+        self._set_title("VF")
         log.info("VoiceFlow ready")
 
     # ======================================================================
@@ -339,15 +339,30 @@ class VoiceFlowApp(rumps.App):
     # ======================================================================
 
     def _set_status(self, status: str) -> None:
+        AppHelper.callAfter(self._set_status_on_main_thread, status)
+
+    def _set_status_on_main_thread(self, status: str) -> None:
         self._status_item.title = f"Status: {status}"
+
+    def _set_title(self, title: str) -> None:
+        AppHelper.callAfter(self._set_title_on_main_thread, title)
+
+    def _set_title_on_main_thread(self, title: str) -> None:
+        self.title = title
+
+    def _notify(self, title: str, subtitle: str, message: str) -> None:
+        AppHelper.callAfter(self._notify_on_main_thread, title, subtitle, message)
+
+    def _notify_on_main_thread(self, title: str, subtitle: str, message: str) -> None:
+        rumps.notification(title=title, subtitle=subtitle, message=message)
 
     def _show_error(self, title: str, message: str) -> None:
         log.error("%s: %s", title, message)
-        self.title = "VF !"
-        self._status_item.title = f"Status: {title}"
+        self._set_title("VF !")
+        self._set_status(title)
         self.overlay.hide()
         try:
-            rumps.notification(
+            self._notify(
                 title=title,
                 subtitle="VoiceFlow",
                 message=message,

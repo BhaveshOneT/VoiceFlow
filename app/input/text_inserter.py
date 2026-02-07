@@ -29,6 +29,7 @@ class TextInserter:
     SETTLE_DELAY = 0.05   # 50ms for pasteboard to settle
     PASTE_DELAY = 0.10    # 100ms for paste to complete
     RESTORE_DELAY = 0.05  # 50ms before restoring clipboard
+    _LONG_TEXT_CHARS = 240
 
     @staticmethod
     def is_accessibility_trusted() -> bool:
@@ -67,10 +68,10 @@ class TextInserter:
                 return False
 
             TextInserter._simulate_paste()
-            time.sleep(TextInserter.PASTE_DELAY)
+            time.sleep(TextInserter._paste_delay_for_text(text))
 
             if restore_clipboard and original is not None:
-                time.sleep(TextInserter.RESTORE_DELAY)
+                time.sleep(TextInserter._restore_delay_for_text(text))
                 TextInserter._set_clipboard(original)
             return True
         except Exception as exc:
@@ -84,6 +85,23 @@ class TextInserter:
                     clipboard_exc,
                 )
             return False
+
+    @classmethod
+    def _paste_delay_for_text(cls, text: str) -> float:
+        text_len = len(text)
+        if text_len <= cls._LONG_TEXT_CHARS:
+            return cls.PASTE_DELAY
+        # Longer pastes need more settle time in some editors; cap to avoid lag.
+        scaled = cls.PASTE_DELAY + min((text_len - cls._LONG_TEXT_CHARS) / 2000.0, 0.35)
+        return min(scaled, 0.45)
+
+    @classmethod
+    def _restore_delay_for_text(cls, text: str) -> float:
+        text_len = len(text)
+        if text_len <= cls._LONG_TEXT_CHARS:
+            return cls.RESTORE_DELAY
+        scaled = cls.RESTORE_DELAY + min((text_len - cls._LONG_TEXT_CHARS) / 1500.0, 0.55)
+        return min(scaled, 0.60)
 
     @staticmethod
     def _get_clipboard() -> Optional[str]:

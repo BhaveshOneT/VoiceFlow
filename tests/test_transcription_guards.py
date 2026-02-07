@@ -59,6 +59,13 @@ class PipelineRefinementGateTests(unittest.TestCase):
         raw = "um i think we should basically update parser module"
         self.assertTrue(self.pipeline._should_refine(cleaned, raw_text=raw))
 
+    def test_long_punctuated_text_skips_refiner_for_speed(self) -> None:
+        text = (
+            "We should ship this after we validate analytics, update the release notes, "
+            "and run one final smoke test so nothing regresses in production."
+        )
+        self.assertFalse(self.pipeline._should_refine(text))
+
 
 class TextCleanerBehaviorTests(unittest.TestCase):
     def test_no_no_correction_preserves_sentence_context(self) -> None:
@@ -86,6 +93,18 @@ class TextCleanerBehaviorTests(unittest.TestCase):
         text = "we should ship today. we should ship today. we should ship today."
         cleaned = TextCleaner.clean(text)
         self.assertEqual(cleaned.lower(), "we should ship today.")
+
+    def test_single_no_statement_does_not_replace_previous_sentence(self) -> None:
+        text = "we should enable this for all users. no we don't want that yet."
+        cleaned = TextCleaner.clean(text).lower()
+        self.assertIn("we should enable this for all users", cleaned)
+        self.assertIn("we don't want that yet", cleaned)
+
+    def test_weak_sorry_cue_preserves_context_when_not_edit_command(self) -> None:
+        text = "the app is stable in staging. sorry we still need to test payments."
+        cleaned = TextCleaner.clean(text).lower()
+        self.assertIn("the app is stable in staging", cleaned)
+        self.assertIn("we still need to test payments", cleaned)
 
 
 if __name__ == "__main__":

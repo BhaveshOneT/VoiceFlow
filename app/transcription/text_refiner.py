@@ -159,7 +159,8 @@ class TextRefiner:
         from mlx_lm import generate  # type: ignore[import-untyped]
         from mlx_lm.sample_utils import make_sampler  # type: ignore[import-untyped]
 
-        max_tokens = min(max(int(len(text.split()) * 2), 20), 96)
+        # Keep response short to reduce latency and avoid over-generation.
+        max_tokens = min(max(int(len(text.split()) * 1.3), 24), 72)
         sampler = make_sampler(temp=0.0)
         result = generate(
             self.model,

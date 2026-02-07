@@ -97,13 +97,14 @@ class TranscriptionPipeline:
         dictionary_terms = self.dictionary.get_all_terms()
         cleaned = self.cleaner.clean(raw, dictionary_terms)
         _log_transcript("After regex cleanup", cleaned)
+        needs_refinement = self._should_refine(cleaned, raw_text=raw)
 
         # 3. LLM refinement (standard + max_accuracy modes)
         if (
             self.refiner
             and self.config.cleanup_mode != "fast"
             and self.refiner.loaded
-            and self._should_refine(cleaned, raw_text=raw)
+            and needs_refinement
         ):
             try:
                 refined = self.refiner.refine(
@@ -121,7 +122,7 @@ class TranscriptionPipeline:
         elif (
             self.refiner
             and self.config.cleanup_mode != "fast"
-            and self._should_refine(cleaned, raw_text=raw)
+            and needs_refinement
             and not self.refiner.loaded
         ):
             # Keep interaction fast while the refiner model downloads/loads.
@@ -150,14 +151,20 @@ class TranscriptionPipeline:
             return True
         if raw_text is not None and _FILLER_CUE_RE.search(raw_text):
             return True
-        if word_count <= 8 and text.endswith((".", "!", "?")):
+        # Long-form, already-punctuated dictation should stay on deterministic
+        # cleanup path for speed and to avoid unnecessary rewrites.
+        if word_count >= 40 and text.endswith((".", "!", "?")):
             return False
-        if word_count < 12 and not _COMPLEX_TEXT_RE.search(text):
+        if word_count <= 10:
             return False
-        # Prefer deterministic path for concise, already-well-formed transcripts.
-        if word_count < 20 and text.endswith((".", "!", "?")) and not _COMPLEX_TEXT_RE.search(text):
+        if word_count < 14 and text.endswith((".", "!", "?")):
             return False
-        return word_count >= 16 or bool(_COMPLEX_TEXT_RE.search(text))
+        has_complexity = bool(_COMPLEX_TEXT_RE.search(text))
+        if text.endswith((".", "!", "?")) and word_count < 24 and not has_complexity:
+            return False
+        if has_complexity and not text.endswith((".", "!", "?")):
+            return True
+        return word_count >= 22 and not text.endswith((".", "!", "?"))
 
     def _transcribe_with_fallback(self, audio: np.ndarray, tech_context: str) -> str:
         """Transcribe audio and fall back to turbo model if max-accuracy model fails."""

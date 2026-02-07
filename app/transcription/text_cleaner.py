@@ -21,13 +21,15 @@ _LEADING_DISCOURSE = re.compile(
 )
 _SENTENCE_SPLIT = re.compile(r'(?<=[.!?])\s+')
 _CORRECTION_PREFIX = re.compile(
-    r'^\s*(?:no(?:\s*,\s*no)?|sorry|actually|rather|correction|'
-    r'i mean|i meant|wait no|no wait)\b[\s,:-]*',
+    r'^\s*(?P<cue>no\s*,\s*no|no\s+no|sorry|rather|correction|'
+    r'i mean|i meant|wait no|no wait|scratch that|never mind(?: that)?|'
+    r'let me rephrase)\b[\s,:-]*',
     re.IGNORECASE,
 )
 _INLINE_CORRECTION = re.compile(
     r'^(?P<prefix>.+?)\s*(?:,\s*|\s+)'
-    r'(?P<cue>sorry|actually|rather|i mean|i meant|no wait|wait no|no\s*,?\s*no)\b'
+    r'(?P<cue>sorry|rather|i mean|i meant|no wait|wait no|no\s*,?\s*no|'
+    r'scratch that|never mind(?: that)?|let me rephrase)\b'
     r'[\s,:-]*(?P<replacement>.+)$',
     re.IGNORECASE,
 )
@@ -140,6 +142,20 @@ _ACTION_START_RE = re.compile(
     re.IGNORECASE,
 )
 _CLAUSE_SPLIT_RE = re.compile(r'(?<=[.!?;:])\s+')
+_STRONG_REPLACE_CUES = {
+    "no no",
+    "no wait",
+    "wait no",
+    "i mean",
+    "i meant",
+    "rather",
+    "correction",
+    "scratch that",
+    "never mind",
+    "never mind that",
+    "let me rephrase",
+}
+_WEAK_REPLACE_CUES = {"sorry"}
 
 
 class TextCleaner:
@@ -182,21 +198,56 @@ class TextCleaner:
             inline = _INLINE_CORRECTION.match(sentence)
             if inline:
                 prefix = inline.group("prefix").strip()
+                cue = cls._normalize_cue(inline.group("cue"))
                 replacement = inline.group("replacement").strip(" ,.-")
-                out.append(cls._merge_with_previous(prefix, replacement))
+                if cls._should_replace_previous(cue, prefix, replacement):
+                    out.append(cls._merge_with_previous(prefix, replacement))
+                else:
+                    out.append(cls._ensure_terminal_punctuation(prefix))
+                    out.append(cls._ensure_terminal_punctuation(replacement))
                 continue
             match = _CORRECTION_PREFIX.match(sentence)
             if match:
+                cue = cls._normalize_cue(match.group("cue"))
                 replacement = sentence[match.end():].strip(" ,.-")
                 if not replacement:
                     continue
-                if out:
+                if out and cls._should_replace_previous(cue, out[-1], replacement):
                     out[-1] = cls._merge_with_previous(out[-1], replacement)
                 else:
-                    out.append(replacement)
+                    out.append(cls._ensure_terminal_punctuation(replacement))
                 continue
             out.append(sentence)
         return " ".join(out)
+
+    @staticmethod
+    def _normalize_cue(cue: str) -> str:
+        cue = cue.strip().lower().replace(",", " ")
+        return re.sub(r"\s+", " ", cue)
+
+    @classmethod
+    def _should_replace_previous(cls, cue: str, previous: str, replacement: str) -> bool:
+        if cue in _STRONG_REPLACE_CUES:
+            return True
+        if cue in _WEAK_REPLACE_CUES:
+            # "sorry" appears in natural speech; only treat it as a correction
+            # when the preceding fragment looks like a direct edit command.
+            if (
+                _VERB_TO_TARGET.match(previous)
+                or _VERB_TRAILING_TOKEN.match(previous)
+                or _ACTION_START_RE.match(previous)
+            ) and len(replacement.split()) <= 10:
+                return True
+        return False
+
+    @staticmethod
+    def _ensure_terminal_punctuation(text: str) -> str:
+        text = text.strip()
+        if not text:
+            return ""
+        if text.endswith((".", "!", "?")):
+            return text
+        return text + "."
 
     @classmethod
     def _merge_with_previous(cls, previous: str, replacement: str) -> str:
@@ -255,7 +306,7 @@ class TextCleaner:
             return merged + "."
 
         # Fallback: replace previous sentence with replacement.
-        return replacement + "."
+        return cls._ensure_terminal_punctuation(replacement)
 
     @classmethod
     def _tag_file_mentions(cls, text: str) -> str:

@@ -87,6 +87,18 @@ If env vars are not set, build still works and skips signing/notarization.
 - Ensure `~/.cache/huggingface/` is writable.
 - Ensure enough free disk space.
 
+### macOS blocks app (unverified developer)
+
+If Gatekeeper blocks launch on an unsigned build, run:
+
+```bash
+xattr -dr com.apple.quarantine /Applications/VoiceFlow.app
+open /Applications/VoiceFlow.app
+```
+
+This works the same on macOS devices as long as VoiceFlow is installed in
+`/Applications`.
+
 ### Logs
 
 Log file:

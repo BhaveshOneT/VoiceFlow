@@ -22,7 +22,7 @@ _LOG_TRANSCRIPTS = os.getenv("VOICEFLOW_LOG_TRANSCRIPTS", "").strip().lower() in
 }
 
 _CORRECTION_CUE_RE = re.compile(
-    r"\b(sorry|i mean|i meant|actually|no wait|wait no|no,\s*no|scratch that|"
+    r"\b(sorry|i mean|i meant|no wait|wait no|no,\s*no|scratch that|"
     r"never mind|let me rephrase|correction|rather)\b",
     re.IGNORECASE,
 )
@@ -39,6 +39,12 @@ _QUESTION_START_RE = re.compile(
     r"hat|haben|gibt|gibt's)\b",
     re.IGNORECASE,
 )
+_ORPHAN_END_RE = re.compile(
+    r"\b(and|or|but|also|so|because|then|if|that|which|who|when|where|while|"
+    r"although|however|therefore)$",
+    re.IGNORECASE,
+)
+_SENTENCE_END_RE = re.compile(r"[.!?]")
 
 
 def _log_transcript(stage: str, text: str) -> None:
@@ -107,12 +113,21 @@ class TranscriptionPipeline:
             and needs_refinement
         ):
             try:
+                pre_refine = cleaned
                 refined = self.refiner.refine(
                     cleaned, dictionary_terms
                 )
                 if refined.strip():
-                    cleaned = refined
-                    _log_transcript("After LLM refinement", cleaned)
+                    if self._is_suspiciously_short_refinement(pre_refine, refined):
+                        log.warning(
+                            "Rejected LLM refinement due to potential truncation "
+                            "(source_words=%d, refined_words=%d)",
+                            len(pre_refine.split()),
+                            len(refined.split()),
+                        )
+                    else:
+                        cleaned = refined
+                        _log_transcript("After LLM refinement", cleaned)
                 else:
                     log.warning("LLM output rejected as prompt/meta leakage")
             except Exception as e:
@@ -133,6 +148,8 @@ class TranscriptionPipeline:
         finalized = self.cleaner.clean(cleaned, dictionary_terms)
         if finalized.strip():
             cleaned = finalized
+
+        cleaned = self._preserve_completeness(raw, cleaned, dictionary_terms)
         _log_transcript("Final transcription output", cleaned)
         return cleaned
 
@@ -151,6 +168,12 @@ class TranscriptionPipeline:
             return True
         if raw_text is not None and _FILLER_CUE_RE.search(raw_text):
             return True
+        # Prefer completeness over rewrite quality for long dictation.
+        if word_count >= 24:
+            return False
+        sentence_count = len(_SENTENCE_END_RE.findall(text))
+        if sentence_count >= 2 and word_count >= 16:
+            return False
         # Long-form, already-punctuated dictation should stay on deterministic
         # cleanup path for speed and to avoid unnecessary rewrites.
         if word_count >= 40 and text.endswith((".", "!", "?")):
@@ -165,6 +188,58 @@ class TranscriptionPipeline:
         if has_complexity and not text.endswith((".", "!", "?")):
             return True
         return word_count >= 22 and not text.endswith((".", "!", "?"))
+
+    @staticmethod
+    def _is_suspiciously_short_refinement(source: str, candidate: str) -> bool:
+        source_words = len(source.split())
+        candidate_words = len(candidate.split())
+        if source_words < 10:
+            return False
+        # Prevent aggressive shortening that can drop meaning.
+        if candidate_words <= 3:
+            return True
+        if source_words >= 40 and candidate_words < int(source_words * 0.88):
+            return True
+        if source_words >= 30 and candidate_words < int(source_words * 0.82):
+            return True
+        if source_words >= 18 and candidate_words < int(source_words * 0.65):
+            return True
+        if len(candidate) < int(len(source) * 0.70) and source_words >= 24:
+            return True
+        if candidate.strip() and _ORPHAN_END_RE.search(candidate.strip()):
+            return True
+        return False
+
+    def _preserve_completeness(
+        self,
+        raw: str,
+        cleaned: str,
+        dictionary_terms: dict[str, str],
+    ) -> str:
+        """Fallback to conservative cleanup if aggressive shortening is detected."""
+        raw_words = len(raw.split())
+        cleaned_words = len(cleaned.split())
+        if raw_words < 24 or cleaned_words == 0:
+            return cleaned
+        if _CORRECTION_CUE_RE.search(raw):
+            return cleaned
+        if cleaned_words >= int(raw_words * 0.78):
+            return cleaned
+        if not _ORPHAN_END_RE.search(cleaned.strip()):
+            return cleaned
+
+        conservative = self.cleaner.clean_conservative(raw, dictionary_terms)
+        conservative_words = len(conservative.split())
+        if conservative_words > cleaned_words:
+            log.warning(
+                "Using conservative cleanup to preserve long dictation "
+                "(raw_words=%d, cleaned_words=%d, conservative_words=%d)",
+                raw_words,
+                cleaned_words,
+                conservative_words,
+            )
+            return conservative
+        return cleaned
 
     def _transcribe_with_fallback(self, audio: np.ndarray, tech_context: str) -> str:
         """Transcribe audio and fall back to turbo model if max-accuracy model fails."""

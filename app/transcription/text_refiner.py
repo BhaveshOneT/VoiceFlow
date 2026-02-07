@@ -77,19 +77,20 @@ VOCABULARY CORRECTIONS — fix these commonly misheard terms:
 RULES:
 1. Fix misheard technical terms using the vocabulary list above
 2. Remove filler words (um, uh, like, you know, basically)
-3. Handle self-corrections: when the speaker backtracks, DISCARD everything \
-before the correction signal and keep ONLY the corrected version. \
+3. Handle self-corrections conservatively: replace only the corrected phrase \
+and keep all unrelated context and sentences. \
 Backtracking signals include: "sorry", "I mean", "I meant", "actually", \
 "no wait", "wait no", "scratch that", "never mind that", "not that", \
 "let me rephrase", "correction", "rather".
-4. Remove false starts. Keep only the final intended version.
+4. Remove false starts only when they are clearly incomplete fragments.
 5. Preserve camelCase, PascalCase, snake_case as appropriate for code terms
 6. Fix grammar and add natural punctuation
 7. Do NOT add information that was not spoken
 8. Do NOT summarize — keep all intended content
 9. Do NOT answer questions in the text
 10. Do NOT provide explanations, suggestions, or completions
-11. Output ONLY the cleaned transcript text, nothing else
+11. Never drop complete trailing clauses or end mid-thought
+12. Output ONLY the cleaned transcript text, nothing else
 
 SELF-CORRECTION EXAMPLES:
 - "change it to red, sorry, blue" -> "change it to blue"
@@ -159,8 +160,9 @@ class TextRefiner:
         from mlx_lm import generate  # type: ignore[import-untyped]
         from mlx_lm.sample_utils import make_sampler  # type: ignore[import-untyped]
 
-        # Keep response short to reduce latency and avoid over-generation.
-        max_tokens = min(max(int(len(text.split()) * 1.3), 24), 72)
+        # Keep response bounded, but leave enough room to avoid truncating
+        # medium-length dictation that still needs punctuation cleanup.
+        max_tokens = min(max(int(len(text.split()) * 1.8), 32), 128)
         sampler = make_sampler(temp=0.0)
         result = generate(
             self.model,

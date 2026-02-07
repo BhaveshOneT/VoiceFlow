@@ -66,6 +66,49 @@ class PipelineRefinementGateTests(unittest.TestCase):
         )
         self.assertFalse(self.pipeline._should_refine(text))
 
+    def test_long_unpunctuated_text_skips_refiner_for_completeness(self) -> None:
+        text = (
+            "we should ship this after we validate analytics and update the release notes "
+            "and run one final smoke test then follow up with monitoring so nothing "
+            "regresses in production and support can track issues quickly"
+        )
+        self.assertFalse(self.pipeline._should_refine(text))
+
+    def test_truncation_guard_rejects_shortened_refinement(self) -> None:
+        source = (
+            "okay we are setting up and i think it is good to go but we need to check "
+            "if it actually worked or not then we will keep writing more sentences and "
+            "more refactoring will follow also i noticed bugs that need to be fixed"
+        )
+        candidate = "we need to check if it actually worked or not and then also"
+        self.assertTrue(
+            self.pipeline._is_suspiciously_short_refinement(source, candidate)
+        )
+
+    def test_truncation_guard_accepts_similar_length_refinement(self) -> None:
+        source = (
+            "we need to validate the migration in staging and then write release notes "
+            "for the team before we deploy to production"
+        )
+        candidate = (
+            "We need to validate the migration in staging, then write release notes "
+            "for the team before deploying to production."
+        )
+        self.assertFalse(
+            self.pipeline._is_suspiciously_short_refinement(source, candidate)
+        )
+
+    def test_preserve_completeness_uses_conservative_fallback(self) -> None:
+        raw = (
+            "we are setting things up and it is good to go but we still need to check "
+            "if it actually worked and keep writing more sentences while tracking bugs "
+            "that still need fixes also"
+        )
+        cleaned = "we still need to check if it actually worked also"
+        out = self.pipeline._preserve_completeness(raw, cleaned, {})
+        self.assertGreater(len(out.split()), len(cleaned.split()))
+        self.assertIn("setting things up", out.lower())
+
 
 class TextCleanerBehaviorTests(unittest.TestCase):
     def test_no_no_correction_preserves_sentence_context(self) -> None:
@@ -105,6 +148,12 @@ class TextCleanerBehaviorTests(unittest.TestCase):
         cleaned = TextCleaner.clean(text).lower()
         self.assertIn("the app is stable in staging", cleaned)
         self.assertIn("we still need to test payments", cleaned)
+
+    def test_clean_conservative_keeps_context_without_replacement(self) -> None:
+        text = "we should enable this for all users no wait not all users yet"
+        cleaned = TextCleaner.clean_conservative(text).lower()
+        self.assertIn("we should enable this for all users", cleaned)
+        self.assertIn("not all users yet", cleaned)
 
 
 if __name__ == "__main__":

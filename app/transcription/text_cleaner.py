@@ -178,6 +178,27 @@ class TextCleaner:
         text = re.sub(r'^[,\s]+', '', text)
         return text.strip()
 
+    @classmethod
+    def clean_conservative(
+        cls,
+        text: str,
+        dictionary: dict[str, str] | None = None,
+    ) -> str:
+        """Conservative cleanup that avoids sentence replacement heuristics."""
+        for pattern in _FILLER_REMOVE:
+            text = pattern.sub('', text)
+        text = _FILLER_REPLACE_SPACE.sub(' ', text)
+        text = _REPEATED_WORD.sub(cls._dedupe_repeated_word, text)
+        if dictionary:
+            for wrong, right in sorted(dictionary.items(), key=lambda kv: -len(kv[0])):
+                text = re.sub(re.escape(wrong), right, text, flags=re.IGNORECASE)
+        text = cls._collapse_repeated_clauses(text)
+        text = cls._tag_file_mentions(text)
+        text = re.sub(r'\s{2,}', ' ', text)
+        text = re.sub(r'\s+([.,!?;:])', r'\1', text)
+        text = re.sub(r'^[,\s]+', '', text)
+        return text.strip()
+
     @staticmethod
     def _dedupe_repeated_word(match: re.Match[str]) -> str:
         token = match.group(1)

@@ -1,7 +1,9 @@
 """Voice Activity Detection using Silero VAD (ONNX)."""
 
+import hashlib
 import ssl
 import urllib.request
+from urllib.parse import urlparse
 
 import certifi
 import numpy as np
@@ -18,7 +20,12 @@ class VoiceActivityDetector:
     when silence is detected. Pre-buffer captures word onsets.
     """
 
-    MODEL_URL = "https://github.com/snakers4/silero-vad/raw/master/src/silero_vad/data/silero_vad.onnx"
+    MODEL_URL = (
+        "https://github.com/snakers4/silero-vad/raw/master/"
+        "src/silero_vad/data/silero_vad.onnx"
+    )
+    MODEL_SHA256 = "1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d8788e3"
+    ALLOWED_DOWNLOAD_HOSTS = {"github.com", "raw.githubusercontent.com"}
     CACHE_DIR = Path.home() / ".cache" / "voiceflow"
     MODEL_PATH = CACHE_DIR / "silero_vad.onnx"
 
@@ -82,12 +89,8 @@ class VoiceActivityDetector:
         if self._session is not None:
             return
 
-        if not self.MODEL_PATH.exists():
-            self.CACHE_DIR.mkdir(parents=True, exist_ok=True)
-            ctx = ssl.create_default_context(cafile=certifi.where())
-            req = urllib.request.Request(self.MODEL_URL)
-            with urllib.request.urlopen(req, context=ctx) as resp:
-                self.MODEL_PATH.write_bytes(resp.read())
+        if not self._has_valid_model_file():
+            self._download_model()
 
         opts = ort.SessionOptions()
         opts.inter_op_num_threads = 1
@@ -95,6 +98,41 @@ class VoiceActivityDetector:
         self._session = ort.InferenceSession(
             str(self.MODEL_PATH), sess_options=opts
         )
+
+    def _has_valid_model_file(self) -> bool:
+        if not self.MODEL_PATH.exists():
+            return False
+        return self._sha256_file(self.MODEL_PATH) == self.MODEL_SHA256
+
+    def _download_model(self) -> None:
+        parsed = urlparse(self.MODEL_URL)
+        if parsed.scheme != "https" or parsed.netloc not in self.ALLOWED_DOWNLOAD_HOSTS:
+            raise RuntimeError(f"Blocked model URL: {self.MODEL_URL}")
+
+        self.CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        ctx = ssl.create_default_context(cafile=certifi.where())
+        req = urllib.request.Request(self.MODEL_URL)
+        with urllib.request.urlopen(req, context=ctx, timeout=30) as resp:  # nosec B310
+            content = resp.read()
+
+        digest = hashlib.sha256(content).hexdigest()
+        if digest != self.MODEL_SHA256:
+            raise RuntimeError(
+                "Silero VAD checksum mismatch. "
+                "Refusing to use unverified model artifact."
+            )
+
+        tmp_path = self.MODEL_PATH.with_suffix(".onnx.tmp")
+        tmp_path.write_bytes(content)
+        tmp_path.replace(self.MODEL_PATH)
+
+    @staticmethod
+    def _sha256_file(path: Path) -> str:
+        h = hashlib.sha256()
+        with path.open("rb") as f:
+            for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                h.update(chunk)
+        return h.hexdigest()
 
     def _infer(self, chunk: np.ndarray) -> float:
         """Run VAD inference on a single chunk. Returns speech probability."""

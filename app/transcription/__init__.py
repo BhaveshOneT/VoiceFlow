@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
 from typing import Optional
 
@@ -14,6 +15,11 @@ from .text_refiner import TextRefiner
 from .whisper_engine import WhisperEngine
 
 log = logging.getLogger(__name__)
+_LOG_TRANSCRIPTS = os.getenv("VOICEFLOW_LOG_TRANSCRIPTS", "").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+}
 
 _CORRECTION_CUE_RE = re.compile(
     r"\b(sorry|i mean|i meant|actually|no wait|wait no|no,\s*no|scratch that|"
@@ -33,6 +39,19 @@ _QUESTION_START_RE = re.compile(
     r"hat|haben|gibt|gibt's)\b",
     re.IGNORECASE,
 )
+
+
+def _log_transcript(stage: str, text: str) -> None:
+    """Log transcript content only when explicitly enabled."""
+    if _LOG_TRANSCRIPTS:
+        log.info("%s: %s", stage, text)
+        return
+    log.info(
+        "%s (chars=%d, words=%d)",
+        stage,
+        len(text),
+        len(text.split()),
+    )
 
 
 class TranscriptionPipeline:
@@ -69,7 +88,7 @@ class TranscriptionPipeline:
         # 1. Whisper transcription
         tech_context = self.dictionary.get_whisper_context()
         raw = self._transcribe_with_fallback(audio, tech_context=tech_context)
-        log.info("Raw transcription: %s", raw)
+        _log_transcript("Raw transcription", raw)
 
         if not raw.strip():
             return ""
@@ -77,7 +96,7 @@ class TranscriptionPipeline:
         # 2. Regex cleanup + dictionary replacement (always, <5ms)
         dictionary_terms = self.dictionary.get_all_terms()
         cleaned = self.cleaner.clean(raw, dictionary_terms)
-        log.info("After regex cleanup: %s", cleaned)
+        _log_transcript("After regex cleanup", cleaned)
 
         # 3. LLM refinement (standard + max_accuracy modes)
         if (
@@ -92,7 +111,7 @@ class TranscriptionPipeline:
                 )
                 if refined.strip():
                     cleaned = refined
-                    log.info("After LLM refinement: %s", cleaned)
+                    _log_transcript("After LLM refinement", cleaned)
                 else:
                     log.warning("LLM output rejected as prompt/meta leakage")
             except Exception as e:
@@ -113,7 +132,7 @@ class TranscriptionPipeline:
         finalized = self.cleaner.clean(cleaned, dictionary_terms)
         if finalized.strip():
             cleaned = finalized
-        log.info("Final transcription output: %s", cleaned)
+        _log_transcript("Final transcription output", cleaned)
         return cleaned
 
     def _should_refine(self, text: str, raw_text: str | None = None) -> bool:

@@ -12,6 +12,8 @@ DIST="$ROOT/dist"
 BUILD="$ROOT/build"
 APP="$DIST/$APP_NAME.app"
 DMG="$DIST/$APP_NAME.dmg"
+CODESIGN_IDENTITY="${VOICEFLOW_CODESIGN_IDENTITY:-}"
+NOTARY_PROFILE="${VOICEFLOW_NOTARY_PROFILE:-}"
 
 echo "==> Cleaning previous builds..."
 rm -rf "$DIST" "$BUILD"
@@ -75,6 +77,24 @@ fi
 echo ""
 echo "==> $APP_NAME.app built successfully at: $APP"
 
+# ── Optional signing ────────────────────────────────────────────
+if [ -n "$CODESIGN_IDENTITY" ]; then
+    echo ""
+    echo "==> Code signing app bundle..."
+    /usr/bin/codesign \
+        --force \
+        --deep \
+        --timestamp \
+        --options runtime \
+        --sign "$CODESIGN_IDENTITY" \
+        "$APP"
+    /usr/bin/codesign --verify --deep --strict "$APP"
+    echo "==> App signed successfully with identity: $CODESIGN_IDENTITY"
+else
+    echo ""
+    echo "==> Skipping code signing (set VOICEFLOW_CODESIGN_IDENTITY to enable)"
+fi
+
 # ── DMG creation ───────────────────────────────────────────────
 echo ""
 echo "==> Creating DMG installer..."
@@ -110,6 +130,24 @@ if [ ! -f "$DMG" ]; then
         "$DMG" >/dev/null
     rm -rf "$STAGING"
     echo "==> DMG created at: $DMG (hdiutil fallback)"
+fi
+
+# ── Optional notarization + stapling ───────────────────────────
+if [ -n "$NOTARY_PROFILE" ]; then
+    if [ -z "$CODESIGN_IDENTITY" ]; then
+        echo "ERROR: VOICEFLOW_NOTARY_PROFILE is set but VOICEFLOW_CODESIGN_IDENTITY is missing."
+        exit 1
+    fi
+    echo ""
+    echo "==> Submitting DMG for notarization (profile: $NOTARY_PROFILE)..."
+    xcrun notarytool submit "$DMG" --keychain-profile "$NOTARY_PROFILE" --wait
+    echo "==> Stapling notarization tickets..."
+    xcrun stapler staple "$APP"
+    xcrun stapler staple "$DMG"
+    echo "==> Notarization and stapling complete."
+else
+    echo ""
+    echo "==> Skipping notarization (set VOICEFLOW_NOTARY_PROFILE to enable)"
 fi
 
 echo ""

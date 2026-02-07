@@ -27,9 +27,9 @@ def _configure_logging() -> None:
     try:
         LOG_DIR.mkdir(parents=True, exist_ok=True)
         handlers.append(logging.FileHandler(LOG_PATH, encoding="utf-8"))
-    except Exception:
+    except Exception as exc:
         # Keep stdout logging even if file logging is unavailable.
-        pass
+        logging.getLogger(__name__).debug("File logging unavailable: %s", exc)
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(name)s %(levelname)s %(message)s",
@@ -64,8 +64,8 @@ def _check_accessibility() -> bool:
             try:
                 AXIsProcessTrustedWithOptions({kAXTrustedCheckOptionPrompt: True})
                 trusted = bool(AXIsProcessTrusted())
-            except Exception:
-                pass
+            except Exception as exc:
+                log.debug("Accessibility prompt check failed: %s", exc)
         log.info("Accessibility check: trusted=%s", trusted)
         return trusted
     except ImportError:
@@ -245,7 +245,11 @@ class VoiceFlowApp(rumps.App):
             self.overlay.hide()
             return
 
-        log.info("Transcription result: %s", result)
+        log.info(
+            "Transcription result ready (chars=%d, words=%d)",
+            len(result),
+            len(result.split()),
+        )
         inserted = TextInserter.insert(result, self.config.restore_clipboard)
         if not inserted:
             detail = TextInserter.last_error or "Paste failed"
@@ -529,7 +533,7 @@ class VoiceFlowApp(rumps.App):
     def _open_system_settings(self, pane: str) -> None:
         url = f"x-apple.systempreferences:com.apple.preference.security?{pane}"
         try:
-            subprocess.run(["open", url], check=False)
+            subprocess.run(["/usr/bin/open", url], check=False)
         except Exception:
             log.exception("Failed to open System Settings: %s", pane)
 

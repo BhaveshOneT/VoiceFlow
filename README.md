@@ -46,11 +46,28 @@ Build outputs:
 
 `build.sh` creates a DMG even without `create-dmg` by falling back to `hdiutil`.
 
+### Signed + Notarized Release Build (recommended)
+
+```bash
+export VOICEFLOW_CODESIGN_IDENTITY="Developer ID Application: YOUR NAME (TEAMID)"
+export VOICEFLOW_NOTARY_PROFILE="voiceflow-notary-profile"
+./scripts/build.sh
+```
+
+If env vars are not set, build still works and skips signing/notarization.
+
 ## Runtime Notes
 
 - Hotkey becomes available as soon as the speech model is ready.
 - LLM refiner loads in background and does not block recording startup.
 - First launch may download model files to `~/.cache/huggingface/`.
+
+## Security Notes
+
+- Transcript text is redacted from logs by default.
+- To temporarily include raw transcript logs for debugging only:
+  - `VOICEFLOW_LOG_TRANSCRIPTS=1`
+- `scripts/download_models.py` uses pinned model revisions and verifies the Silero VAD checksum.
 
 ## Troubleshooting
 

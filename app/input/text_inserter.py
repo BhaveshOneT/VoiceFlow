@@ -78,8 +78,11 @@ class TextInserter:
             TextInserter.last_error = str(exc)
             try:
                 TextInserter._set_clipboard(text)
-            except Exception:
-                pass
+            except Exception as clipboard_exc:
+                log.debug(
+                    "Failed to preserve text in clipboard after paste error: %s",
+                    clipboard_exc,
+                )
             return False
 
     @staticmethod

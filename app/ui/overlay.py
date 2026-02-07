@@ -404,5 +404,5 @@ class RecordingOverlay:
                 self._ring_layer.removeAnimationForKey_("ringPulse")
                 self._ring_layer.setOpacity_(0.0)
                 self._ring_layer.setTransform_(Quartz.CATransform3DIdentity)
-        except Exception:
-            pass
+        except Exception as exc:
+            log.debug("Failed to stop pulse animation cleanly: %s", exc)

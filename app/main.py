@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import subprocess
 from pathlib import Path
 
 import numpy as np
@@ -54,6 +55,12 @@ class VoiceFlowApp(rumps.App):
         self._test_item = rumps.MenuItem(
             "Test Recording", callback=self._test_recording
         )
+        self._accessibility_item = rumps.MenuItem(
+            "Open Accessibility Settings", callback=self._open_accessibility_settings
+        )
+        self._microphone_item = rumps.MenuItem(
+            "Open Microphone Settings", callback=self._open_microphone_settings
+        )
 
         self._fast_item = rumps.MenuItem("Fast Mode", callback=self._set_fast_mode)
         self._standard_item = rumps.MenuItem("Standard Mode", callback=self._set_standard_mode)
@@ -68,6 +75,9 @@ class VoiceFlowApp(rumps.App):
             menu=[
                 self._status_item,
                 self._test_item,
+                None,  # separator
+                self._accessibility_item,
+                self._microphone_item,
                 None,  # separator
                 accuracy_menu,
                 None,  # separator
@@ -113,9 +123,18 @@ class VoiceFlowApp(rumps.App):
                 log.debug("Still processing previous audio; ignoring new recording")
                 return
         log.info("Recording started")
-        self.audio.drain()
-        self.audio.start()
+        try:
+            self.audio.drain()
+            self.audio.start()
+        except Exception:
+            log.exception("Failed to start microphone capture")
+            self._show_error(
+                title="Microphone error",
+                message="Unable to start audio capture. Check microphone permission.",
+            )
+            return
         self.title = "VF \u25cf"  # bullet
+        self._set_status("Recording")
         self.overlay.show_recording()
 
     def _on_recording_stop(self, cancelled: bool = False) -> None:
@@ -132,18 +151,21 @@ class VoiceFlowApp(rumps.App):
         if cancelled:
             log.info("Recording cancelled (hold too short)")
             self.title = "VF"
+            self._set_status("Ready")
             self.overlay.hide()
             return
 
         if audio.size < _MIN_AUDIO_SAMPLES:
             log.info("Audio too short (%d samples); discarding", audio.size)
             self.title = "VF"
+            self._set_status("Ready")
             self.overlay.hide()
             return
 
         log.info("Recording stopped; captured %d samples (%.1fs)",
                  audio.size, audio.size / AudioCapture.SAMPLE_RATE)
         self.title = "VF ..."
+        self._set_status("Processing")
         self.overlay.show_processing()
         with self._lock:
             self._processing = True
@@ -161,23 +183,33 @@ class VoiceFlowApp(rumps.App):
         """Run the transcription pipeline and insert the result."""
         try:
             result = self.pipeline.process(audio)
-            if result:
-                log.info("Transcription result: %s", result)
-                TextInserter.insert(result, self.config.restore_clipboard)
-            else:
-                log.info("Pipeline returned empty result (no speech detected)")
         except Exception:
-            log.exception("Error during audio processing")
-            self.title = "VF !"
-            self.overlay.hide()
-            # Brief error indicator, then reset
-            threading.Timer(2.0, self._reset_title).start()
+            log.exception("Transcription failed")
+            self._show_error(
+                title="Transcription failed",
+                message="Failed to transcribe audio. Check model downloads and logs.",
+            )
             return
         finally:
             with self._lock:
                 self._processing = False
 
+        if not result:
+            log.info("Pipeline returned empty result (no speech detected)")
+            self.title = "VF"
+            self._set_status("Ready")
+            self.overlay.hide()
+            return
+
+        log.info("Transcription result: %s", result)
+        inserted = TextInserter.insert(result, self.config.restore_clipboard)
+        if not inserted:
+            detail = TextInserter.last_error or "Paste failed"
+            self._show_error(title="Paste failed", message=detail)
+            return
+
         self.title = "VF"
+        self._set_status("Ready")
         self.overlay.hide()
 
     def _reset_title(self) -> None:
@@ -199,8 +231,17 @@ class VoiceFlowApp(rumps.App):
         # Show overlay immediately
         self.overlay.show_recording()
         self.title = "VF \u25cf"
-        self.audio.drain()
-        self.audio.start()
+        self._set_status("Recording")
+        try:
+            self.audio.drain()
+            self.audio.start()
+        except Exception:
+            log.exception("Failed to start microphone capture (test)")
+            self._show_error(
+                title="Microphone error",
+                message="Unable to start audio capture. Check microphone permission.",
+            )
+            return
 
         def _stop_after_delay():
             import time
@@ -251,14 +292,17 @@ class VoiceFlowApp(rumps.App):
             self.pipeline.warm_up()
         except Exception:
             log.exception("Failed to warm up models")
-            self._status_item.title = "Status: Model load failed"
-            self.title = "VF !"
+            self._show_error(
+                title="Model load failed",
+                message="Failed to warm up models. Check model downloads.",
+            )
             return
 
         # Check Accessibility permission (needed for hotkeys + text insertion)
         try:
             if not _check_accessibility():
                 log.warning("Accessibility permission not granted")
+                self._status_item.title = "Status: Accessibility required"
                 rumps.notification(
                     title="Accessibility Permission Required",
                     subtitle="VoiceFlow needs Accessibility access",
@@ -289,6 +333,41 @@ class VoiceFlowApp(rumps.App):
             self.audio.stop()
         if self.pipeline.refiner and self.pipeline.refiner.loaded:
             self.pipeline.refiner.unload()
+
+    # ======================================================================
+    # Helpers
+    # ======================================================================
+
+    def _set_status(self, status: str) -> None:
+        self._status_item.title = f"Status: {status}"
+
+    def _show_error(self, title: str, message: str) -> None:
+        log.error("%s: %s", title, message)
+        self.title = "VF !"
+        self._status_item.title = f"Status: {title}"
+        self.overlay.hide()
+        try:
+            rumps.notification(
+                title=title,
+                subtitle="VoiceFlow",
+                message=message,
+            )
+        except Exception:
+            log.debug("Notification failed", exc_info=True)
+        threading.Timer(2.0, self._reset_title).start()
+
+    def _open_accessibility_settings(self, sender: rumps.MenuItem) -> None:
+        self._open_system_settings("Privacy_Accessibility")
+
+    def _open_microphone_settings(self, sender: rumps.MenuItem) -> None:
+        self._open_system_settings("Privacy_Microphone")
+
+    def _open_system_settings(self, pane: str) -> None:
+        url = f"x-apple.systempreferences:com.apple.preference.security?{pane}"
+        try:
+            subprocess.run(["open", url], check=False)
+        except Exception:
+            log.exception("Failed to open System Settings: %s", pane)
 
 
 def main() -> None:

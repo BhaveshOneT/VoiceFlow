@@ -33,7 +33,14 @@ _PULSE_DURATION = 1.0
 
 def _main_screen_frame() -> AppKit.NSRect:
     """Return the frame of the main screen (includes menu bar area)."""
-    return AppKit.NSScreen.mainScreen().frame()
+    screen = AppKit.NSScreen.mainScreen()
+    if screen is None:
+        screens = AppKit.NSScreen.screens()
+        if screens:
+            screen = screens[0]
+    if screen is None:
+        raise RuntimeError("No screen available to place overlay")
+    return screen.frame()
 
 
 # ---------------------------------------------------------------------------
@@ -51,6 +58,7 @@ class RecordingOverlay:
         self._panel: AppKit.NSPanel | None = None
         self._dot_layer: Quartz.CALayer | None = None
         self._label: AppKit.NSTextField | None = None
+        self._dot_view: AppKit.NSView | None = None
         self._built = False
 
     # ------------------------------------------------------------------
@@ -87,6 +95,8 @@ class RecordingOverlay:
         panel.setIgnoresMouseEvents_(True)
         panel.setCanBecomeKeyWindow_(False)
         panel.setCanBecomeMainWindow_(False)
+        panel.setHidesOnDeactivate_(False)
+        panel.setFloatingPanel_(True)
         panel.setHasShadow_(True)
         panel.setAnimationBehavior_(AppKit.NSWindowAnimationBehaviorNone)
 
@@ -97,16 +107,30 @@ class RecordingOverlay:
             | AppKit.NSWindowCollectionBehaviorFullScreenAuxiliary
         )
 
-        # --- vibrancy background ---
+        # --- vibrancy background (with fallback to solid view) ---
         content_frame = AppKit.NSMakeRect(0, 0, _PILL_WIDTH, _PILL_HEIGHT)
-        vibrancy = AppKit.NSVisualEffectView.alloc().initWithFrame_(content_frame)
-        vibrancy.setMaterial_(AppKit.NSVisualEffectMaterialHUDWindow)
-        vibrancy.setBlendingMode_(AppKit.NSVisualEffectBlendingModeBehindWindow)
-        vibrancy.setState_(AppKit.NSVisualEffectStateActive)
-        vibrancy.setWantsLayer_(True)
-        vibrancy.layer().setCornerRadius_(_CORNER_RADIUS)
-        vibrancy.layer().setMasksToBounds_(True)
-        panel.contentView().addSubview_(vibrancy)
+        container: AppKit.NSView
+        try:
+            vibrancy = AppKit.NSVisualEffectView.alloc().initWithFrame_(content_frame)
+            vibrancy.setMaterial_(AppKit.NSVisualEffectMaterialHUDWindow)
+            vibrancy.setBlendingMode_(AppKit.NSVisualEffectBlendingModeBehindWindow)
+            vibrancy.setState_(AppKit.NSVisualEffectStateActive)
+            vibrancy.setWantsLayer_(True)
+            vibrancy.layer().setCornerRadius_(_CORNER_RADIUS)
+            vibrancy.layer().setMasksToBounds_(True)
+            panel.contentView().addSubview_(vibrancy)
+            container = vibrancy
+        except Exception:
+            log.exception("Failed to create vibrancy view; using solid fallback")
+            solid = AppKit.NSView.alloc().initWithFrame_(content_frame)
+            solid.setWantsLayer_(True)
+            solid.layer().setBackgroundColor_(
+                AppKit.NSColor.colorWithCalibratedWhite_alpha_(0.1, 0.85).CGColor()
+            )
+            solid.layer().setCornerRadius_(_CORNER_RADIUS)
+            solid.layer().setMasksToBounds_(True)
+            panel.contentView().addSubview_(solid)
+            container = solid
 
         # --- red dot (recording indicator) ---
         dot_y = (_PILL_HEIGHT - _DOT_DIAMETER) / 2
@@ -118,7 +142,7 @@ class RecordingOverlay:
             AppKit.NSColor.redColor().CGColor()
         )
         dot_layer.setCornerRadius_(_DOT_DIAMETER / 2)
-        vibrancy.addSubview_(dot_view)
+        container.addSubview_(dot_view)
         self._dot_layer = dot_layer
         self._dot_view = dot_view
 
@@ -132,7 +156,7 @@ class RecordingOverlay:
         label.setTextColor_(AppKit.NSColor.whiteColor())
         label.setAlignment_(AppKit.NSTextAlignmentLeft)
         label.setLineBreakMode_(AppKit.NSLineBreakByTruncatingTail)
-        vibrancy.addSubview_(label)
+        container.addSubview_(label)
         self._label = label
 
         panel.setAlphaValue_(0.0)
@@ -199,6 +223,12 @@ class RecordingOverlay:
 
     def _fade_in(self) -> None:
         try:
+            if self._panel is None:
+                return
+            try:
+                self._panel.orderFrontRegardless()
+            except Exception:
+                self._panel.orderFront_(None)
             AppKit.NSAnimationContext.beginGrouping()
             AppKit.NSAnimationContext.currentContext().setDuration_(_FADE_DURATION)
             self._panel.animator().setAlphaValue_(1.0)
@@ -206,17 +236,21 @@ class RecordingOverlay:
         except Exception:
             # Fallback: set alpha directly without animation
             log.debug("Animation fallback: setting alpha directly")
-            self._panel.setAlphaValue_(1.0)
+            if self._panel is not None:
+                self._panel.setAlphaValue_(1.0)
 
     def _fade_out(self) -> None:
         try:
+            if self._panel is None:
+                return
             AppKit.NSAnimationContext.beginGrouping()
             AppKit.NSAnimationContext.currentContext().setDuration_(_FADE_DURATION)
             self._panel.animator().setAlphaValue_(0.0)
             AppKit.NSAnimationContext.endGrouping()
         except Exception:
             log.debug("Animation fallback: setting alpha directly")
-            self._panel.setAlphaValue_(0.0)
+            if self._panel is not None:
+                self._panel.setAlphaValue_(0.0)
 
     def _start_pulse(self) -> None:
         if self._dot_layer is None:

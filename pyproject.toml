@@ -1,0 +1,32 @@
+[project]
+name = "voiceflow"
+version = "1.0.0"
+description = "Local AI dictation for macOS - WisprFlow clone"
+requires-python = ">=3.10"
+dependencies = [
+    "rumps>=0.4.0",
+    "sounddevice>=0.5.0",
+    "numpy>=1.24",
+    "pynput>=1.7.6",
+    "pyobjc-framework-Cocoa>=10.0",
+    "pyobjc-framework-Quartz>=10.0",
+    "pyobjc-framework-ApplicationServices>=10.0",
+    "onnxruntime>=1.17.0",
+    "mlx-whisper>=0.4.0",
+    "mlx-lm>=0.18.0",
+    "huggingface-hub>=0.20.0",
+    "certifi",
+]
+
+[project.scripts]
+voiceflow = "app.main:main"
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+
+[tool.setuptools.package-data]
+app = ["resources/*.json"]

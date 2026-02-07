@@ -1,0 +1,63 @@
+"""Speech-to-text transcription using mlx-whisper."""
+from __future__ import annotations
+
+import logging
+
+import numpy as np
+
+log = logging.getLogger(__name__)
+
+DEFAULT_MODEL = "mlx-community/whisper-large-v3-turbo"
+
+
+class WhisperEngine:
+    """MLX-powered Whisper transcription optimized for dictation."""
+
+    def __init__(self, model_name: str = DEFAULT_MODEL, language: str = "en") -> None:
+        self.model_name = model_name
+        self.language = language
+        self._warmed_up = False
+
+    def transcribe(self, audio: np.ndarray, tech_context: str = "") -> str:
+        """Transcribe float32 audio array to text.
+
+        Uses mlx_whisper.transcribe() with language pre-set (skips
+        auto-detection) and an initial_prompt built from the tech context
+        to bias the decoder toward programming vocabulary.
+        """
+        import mlx_whisper  # type: ignore[import-untyped]
+
+        result = mlx_whisper.transcribe(
+            audio,
+            path_or_hf_repo=self.model_name,
+            language=self.language,
+            initial_prompt=self._build_prompt(tech_context),
+            condition_on_previous_text=False,
+        )
+        return result["text"].strip()
+
+    def warm_up(self) -> None:
+        """Run dummy inference to initialize the Metal/GPU pipeline."""
+        if self._warmed_up:
+            return
+        log.info("Warming up Whisper model %s", self.model_name)
+        dummy = np.zeros(16000, dtype=np.float32)  # 1 second of silence
+        try:
+            self.transcribe(dummy)
+        except Exception:
+            pass  # Warm-up may produce empty result; that's fine
+        self._warmed_up = True
+        log.info("Whisper warm-up complete")
+
+    def _build_prompt(self, tech_context: str) -> str:
+        """Build initial_prompt biasing Whisper toward clean output.
+
+        Max 224 tokens -- Whisper silently truncates beyond this.
+        """
+        base = (
+            "The following is a clean, well-punctuated transcription "
+            "from a software development session."
+        )
+        if tech_context:
+            return f"{base} {tech_context}"
+        return base

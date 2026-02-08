@@ -7,6 +7,7 @@ of all windows, ignores mouse events, and appears on every Space.
 from __future__ import annotations
 
 import logging
+import math
 import threading
 import time
 
@@ -26,7 +27,8 @@ _PILL_HEIGHT = 44
 _BOTTOM_MARGIN = 72  # distance from bottom of screen
 _CORNER_RADIUS = _PILL_HEIGHT / 2
 _PILL_MIN_WIDTH = 188
-_PILL_MAX_WIDTH = 304
+_PILL_MAX_WIDTH = 420
+_TEXT_WIDTH_BUFFER = 30
 
 _ICON_DIAMETER = 22
 _ICON_LEFT_PADDING = 14
@@ -115,6 +117,12 @@ class RecordingOverlay:
         panel.setFloatingPanel_(True)
         panel.setHasShadow_(True)
         panel.setAnimationBehavior_(AppKit.NSWindowAnimationBehaviorNone)
+        try:
+            panel.setAppearance_(
+                AppKit.NSAppearance.appearanceNamed_(AppKit.NSAppearanceNameVibrantDark)
+            )
+        except Exception:
+            log.debug("Failed to force dark overlay appearance")
 
         # Visible on all Spaces / full-screen apps
         panel.setCollectionBehavior_(
@@ -244,10 +252,17 @@ class RecordingOverlay:
             )
         )
         label.setWantsLayer_(True)
-        label.setTextColor_(AppKit.NSColor.whiteColor())
+        label.setTextColor_(AppKit.NSColor.colorWithCalibratedWhite_alpha_(0.98, 1.0))
         label.setAlignment_(AppKit.NSTextAlignmentLeft)
         label.setLineBreakMode_(AppKit.NSLineBreakByTruncatingTail)
         label.setUsesSingleLineMode_(True)
+        try:
+            label.layer().setShadowColor_(AppKit.NSColor.blackColor().CGColor())
+            label.layer().setShadowOpacity_(0.78)
+            label.layer().setShadowRadius_(2.2)
+            label.layer().setShadowOffset_(AppKit.NSMakeSize(0, -1))
+        except Exception:
+            log.debug("Failed to apply label shadow")
         container.addSubview_(label)
         self._label = label
         self._last_label_text = "Listening..."
@@ -383,8 +398,9 @@ class RecordingOverlay:
             _ICON_LEFT_PADDING
             + _ICON_DIAMETER
             + _ICON_TEXT_GAP
-            + int(text_size.width)
+            + int(math.ceil(text_size.width))
             + _LABEL_RIGHT_PADDING
+            + _TEXT_WIDTH_BUFFER
         )
         width = max(_PILL_MIN_WIDTH, min(_PILL_MAX_WIDTH, desired_width))
 

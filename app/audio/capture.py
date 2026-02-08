@@ -1,5 +1,6 @@
 """Real-time microphone capture using sounddevice."""
 
+from collections import deque
 import logging
 import time
 
@@ -21,6 +22,8 @@ class AudioCapture:
     SAMPLE_RATE = 16000
     BLOCK_SIZE = 512  # ~32ms at 16kHz
     TRAILING_CAPTURE_MS = 280  # default tail after key-up
+    MIN_TRAILING_CAPTURE_MS = 130
+    QUIET_BLOCKS_TO_STOP = 3
 
     def __init__(self, sample_rate: int = SAMPLE_RATE, block_size: int = BLOCK_SIZE):
         self.sample_rate = sample_rate
@@ -28,9 +31,14 @@ class AudioCapture:
         self.queue: Queue[np.ndarray] = Queue()
         self._stream: Optional[sd.InputStream] = None
         self._started_at: Optional[float] = None
+        self._recent_rms: deque[float] = deque(maxlen=32)
 
     def _callback(self, indata: np.ndarray, frames: int, time_info, status) -> None:
-        self.queue.put(indata[:, 0].copy())
+        chunk = indata[:, 0].copy()
+        if chunk.size:
+            rms = float(np.sqrt(np.mean(np.square(chunk))))
+            self._recent_rms.append(rms)
+        self.queue.put(chunk)
 
     def start(self) -> None:
         self._stream = sd.InputStream(
@@ -49,12 +57,14 @@ class AudioCapture:
         A short tail capture window helps avoid clipping the final words when
         users release the hotkey while still finishing a phrase.
         """
+        chunks: list[np.ndarray] = []
+        chunks.extend(self._drain_queue_nowait())
+
         if trailing_capture_ms is None:
             trailing_capture_ms = self._default_trailing_capture_ms()
         if self._stream is not None:
             try:
-                if trailing_capture_ms > 0:
-                    time.sleep(trailing_capture_ms / 1000.0)
+                chunks.extend(self._collect_trailing_chunks(trailing_capture_ms))
                 self._stream.stop()
                 self._stream.close()
             except Exception as e:
@@ -62,13 +72,7 @@ class AudioCapture:
             finally:
                 self._stream = None
                 self._started_at = None
-
-        chunks: list[np.ndarray] = []
-        while True:
-            try:
-                chunks.append(self.queue.get_nowait())
-            except Empty:
-                break
+        chunks.extend(self._drain_queue_nowait())
 
         if chunks:
             return np.concatenate(chunks)
@@ -99,10 +103,61 @@ class AudioCapture:
             return 340
         return self.TRAILING_CAPTURE_MS
 
-    def drain(self) -> None:
-        """Clear all buffered audio from the queue."""
+    def _collect_trailing_chunks(self, trailing_capture_ms: int) -> list[np.ndarray]:
+        if trailing_capture_ms <= 0:
+            return []
+        start = time.monotonic()
+        deadline = start + (trailing_capture_ms / 1000.0)
+        poll_timeout = max(self.block_size / self.sample_rate, 0.01)
+        quiet_blocks = 0
+        chunks: list[np.ndarray] = []
+        quiet_threshold = self._silence_rms_threshold()
+
+        while True:
+            now = time.monotonic()
+            if now >= deadline:
+                break
+            timeout = min(poll_timeout, deadline - now)
+            if timeout <= 0:
+                break
+            try:
+                chunk = self.queue.get(timeout=timeout)
+            except Empty:
+                if (now - start) * 1000.0 >= self.MIN_TRAILING_CAPTURE_MS:
+                    quiet_blocks += 1
+                    if quiet_blocks >= self.QUIET_BLOCKS_TO_STOP:
+                        break
+                continue
+
+            chunks.append(chunk)
+            if chunk.size == 0:
+                continue
+            rms = float(np.sqrt(np.mean(np.square(chunk))))
+            if rms <= quiet_threshold:
+                if (time.monotonic() - start) * 1000.0 >= self.MIN_TRAILING_CAPTURE_MS:
+                    quiet_blocks += 1
+                    if quiet_blocks >= self.QUIET_BLOCKS_TO_STOP:
+                        break
+            else:
+                quiet_blocks = 0
+        return chunks
+
+    def _silence_rms_threshold(self) -> float:
+        if not self._recent_rms:
+            return 0.004
+        values = np.asarray(self._recent_rms, dtype=np.float32)
+        baseline = float(np.percentile(values, 25))
+        return min(max(baseline * 1.8, 0.0032), 0.02)
+
+    def _drain_queue_nowait(self) -> list[np.ndarray]:
+        chunks: list[np.ndarray] = []
         while True:
             try:
-                self.queue.get_nowait()
+                chunks.append(self.queue.get_nowait())
             except Empty:
                 break
+        return chunks
+
+    def drain(self) -> None:
+        """Clear all buffered audio from the queue."""
+        self._drain_queue_nowait()

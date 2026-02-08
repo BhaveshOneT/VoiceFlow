@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import time
 from typing import Optional
 
 import numpy as np
@@ -45,6 +46,10 @@ _ORPHAN_END_RE = re.compile(
     re.IGNORECASE,
 )
 _SENTENCE_END_RE = re.compile(r"[.!?]")
+_TRIM_FRAME_SAMPLES = 320  # 20 ms at 16 kHz
+_TRIM_PADDING_SAMPLES = 3520  # 220 ms safety pad around speech
+_TRIM_MIN_RMS = 0.0025
+_TRIM_MAX_RMS = 0.018
 
 
 def _log_transcript(stage: str, text: str) -> None:
@@ -91,27 +96,49 @@ class TranscriptionPipeline:
 
     def process(self, audio: np.ndarray) -> str:
         """Run the full pipeline on audio data. Returns cleaned text."""
+        total_started = time.perf_counter()
+        input_samples = int(audio.size)
+
+        audio, trimmed = self._trim_silence_for_decode(audio)
+        decode_samples = int(audio.size)
+
         # 1. Whisper transcription
+        stt_started = time.perf_counter()
         tech_context = self.dictionary.get_whisper_context()
         raw = self._transcribe_with_fallback(audio, tech_context=tech_context)
+        stt_ms = (time.perf_counter() - stt_started) * 1000.0
         _log_transcript("Raw transcription", raw)
 
         if not raw.strip():
+            total_ms = (time.perf_counter() - total_started) * 1000.0
+            log.info(
+                "Pipeline timings (ms): total=%.1f stt=%.1f clean=0.0 refine=0.0 "
+                "finalize=0.0 input_s=%.2f decode_s=%.2f trimmed=%s",
+                total_ms,
+                stt_ms,
+                input_samples / 16000.0,
+                decode_samples / 16000.0,
+                trimmed,
+            )
             return ""
 
         # 2. Regex cleanup + dictionary replacement (always, <5ms)
+        clean_started = time.perf_counter()
         dictionary_terms = self.dictionary.get_all_terms()
         cleaned = self.cleaner.clean(raw, dictionary_terms)
+        clean_ms = (time.perf_counter() - clean_started) * 1000.0
         _log_transcript("After regex cleanup", cleaned)
         needs_refinement = self._should_refine(cleaned, raw_text=raw)
 
         # 3. LLM refinement (standard + max_accuracy modes)
+        refine_ms = 0.0
         if (
             self.refiner
             and self.config.cleanup_mode != "fast"
             and self.refiner.loaded
             and needs_refinement
         ):
+            refine_started = time.perf_counter()
             try:
                 pre_refine = cleaned
                 refined = self.refiner.refine(
@@ -134,6 +161,8 @@ class TranscriptionPipeline:
                 log.warning(
                     "LLM refinement failed, using regex result: %s", e
                 )
+            finally:
+                refine_ms = (time.perf_counter() - refine_started) * 1000.0
         elif (
             self.refiner
             and self.config.cleanup_mode != "fast"
@@ -145,13 +174,71 @@ class TranscriptionPipeline:
 
         # 4. Final deterministic cleanup to enforce tag formatting and
         # disfluency rules even after optional LLM rewriting.
+        finalize_started = time.perf_counter()
         finalized = self.cleaner.clean(cleaned, dictionary_terms)
         if finalized.strip():
             cleaned = finalized
 
         cleaned = self._preserve_completeness(raw, cleaned, dictionary_terms)
+        finalize_ms = (time.perf_counter() - finalize_started) * 1000.0
+        total_ms = (time.perf_counter() - total_started) * 1000.0
+        log.info(
+            "Pipeline timings (ms): total=%.1f stt=%.1f clean=%.1f refine=%.1f "
+            "finalize=%.1f input_s=%.2f decode_s=%.2f trimmed=%s refine_needed=%s",
+            total_ms,
+            stt_ms,
+            clean_ms,
+            refine_ms,
+            finalize_ms,
+            input_samples / 16000.0,
+            decode_samples / 16000.0,
+            trimmed,
+            needs_refinement,
+        )
         _log_transcript("Final transcription output", cleaned)
         return cleaned
+
+    @staticmethod
+    def _trim_silence_for_decode(audio: np.ndarray) -> tuple[np.ndarray, bool]:
+        """Trim leading/trailing silence before STT to reduce decode latency."""
+        if audio.size < _TRIM_FRAME_SAMPLES * 4:
+            return audio, False
+
+        usable = (audio.size // _TRIM_FRAME_SAMPLES) * _TRIM_FRAME_SAMPLES
+        if usable <= 0:
+            return audio, False
+
+        framed = audio[:usable].reshape(-1, _TRIM_FRAME_SAMPLES)
+        rms = np.sqrt(np.mean(np.square(framed), axis=1))
+        noise_floor = float(np.percentile(rms, 20))
+        threshold = max(_TRIM_MIN_RMS, min(_TRIM_MAX_RMS, noise_floor * 2.4))
+        active = np.where(rms > threshold)[0]
+
+        if active.size == 0:
+            return audio, False
+
+        start = max(int(active[0] * _TRIM_FRAME_SAMPLES) - _TRIM_PADDING_SAMPLES, 0)
+        end = min(
+            int((active[-1] + 1) * _TRIM_FRAME_SAMPLES) + _TRIM_PADDING_SAMPLES,
+            int(audio.size),
+        )
+        if end - start <= 0:
+            return audio, False
+
+        trimmed = audio[start:end]
+        if trimmed.size >= audio.size:
+            return audio, False
+
+        # Avoid over-trimming low-volume dictation by enforcing a wide minimum
+        # window for medium/long recordings.
+        if audio.size >= 16000 * 3 and trimmed.size < int(audio.size * 0.4):
+            expanded_start = max(start - 16000 // 2, 0)
+            expanded_end = min(end + 16000 // 2, int(audio.size))
+            trimmed = audio[expanded_start:expanded_end]
+            if trimmed.size >= audio.size:
+                return audio, False
+
+        return trimmed, True
 
     def _should_refine(self, text: str, raw_text: str | None = None) -> bool:
         """Heuristic gate to avoid unnecessary LLM calls and reduce latency."""

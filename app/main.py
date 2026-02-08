@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 import threading
 import subprocess
+import time
 from pathlib import Path
 
 import numpy as np
@@ -189,7 +190,9 @@ class VoiceFlowApp(rumps.App):
         if not self.audio.is_active():
             return  # Already stopped (duplicate key event from macOS)
 
+        capture_stop_started = time.perf_counter()
         audio = self.audio.stop()
+        capture_stop_ms = (time.perf_counter() - capture_stop_started) * 1000.0
 
         if cancelled:
             log.info("Recording cancelled (hold too short)")
@@ -205,8 +208,12 @@ class VoiceFlowApp(rumps.App):
             self.overlay.hide()
             return
 
-        log.info("Recording stopped; captured %d samples (%.1fs)",
-                 audio.size, audio.size / AudioCapture.SAMPLE_RATE)
+        log.info(
+            "Recording stopped; captured %d samples (%.1fs), capture_stop_ms=%.1f",
+            audio.size,
+            audio.size / AudioCapture.SAMPLE_RATE,
+            capture_stop_ms,
+        )
         self._set_title("VF ...")
         self._set_status("Processing")
         self.overlay.show_processing()
@@ -224,8 +231,12 @@ class VoiceFlowApp(rumps.App):
 
     def _process_audio(self, audio: np.ndarray) -> None:
         """Run the transcription pipeline and insert the result."""
+        process_started = time.perf_counter()
+        pipeline_ms = 0.0
         try:
+            pipeline_started = time.perf_counter()
             result = self.pipeline.process(audio)
+            pipeline_ms = (time.perf_counter() - pipeline_started) * 1000.0
         except Exception as exc:
             log.exception("Transcription failed")
             detail = str(exc).strip() or exc.__class__.__name__
@@ -250,7 +261,16 @@ class VoiceFlowApp(rumps.App):
             len(result),
             len(result.split()),
         )
+        paste_started = time.perf_counter()
         inserted = TextInserter.insert(result, self.config.restore_clipboard)
+        paste_ms = (time.perf_counter() - paste_started) * 1000.0
+        total_ms = (time.perf_counter() - process_started) * 1000.0
+        log.info(
+            "End-to-end post-record timings (ms): pipeline=%.1f paste=%.1f total=%.1f",
+            pipeline_ms,
+            paste_ms,
+            total_ms,
+        )
         if not inserted:
             detail = TextInserter.last_error or "Paste failed"
             if "Accessibility permission required" in detail:

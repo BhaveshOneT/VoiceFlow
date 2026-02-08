@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from typing import Optional
 
@@ -31,6 +32,9 @@ class TextInserter:
     RESTORE_DELAY = 0.08  # base delay before restoring clipboard
     _LONG_TEXT_CHARS = 180
     _VERY_LONG_TEXT_CHARS = 420
+    _ASYNC_RESTORE_CHARS = 260
+    _restore_lock = threading.Lock()
+    _restore_generation = 0
 
     @staticmethod
     def is_accessibility_trusted() -> bool:
@@ -54,8 +58,12 @@ class TextInserter:
             return True
 
         original: Optional[str] = None
+        restore_token: Optional[int] = None
         if restore_clipboard:
             original = TextInserter._get_clipboard()
+            with TextInserter._restore_lock:
+                TextInserter._restore_generation += 1
+                restore_token = TextInserter._restore_generation
 
         try:
             TextInserter._set_clipboard(text)
@@ -71,9 +79,23 @@ class TextInserter:
             TextInserter._simulate_paste()
             time.sleep(TextInserter._paste_delay_for_text(text))
 
-            if restore_clipboard and original is not None:
-                time.sleep(TextInserter._restore_delay_for_text(text))
-                TextInserter._set_clipboard(original)
+            if (
+                restore_clipboard
+                and original is not None
+                and restore_token is not None
+            ):
+                restore_delay = TextInserter._restore_delay_for_text(text)
+                if len(text) >= TextInserter._ASYNC_RESTORE_CHARS:
+                    timer = threading.Timer(
+                        restore_delay,
+                        TextInserter._restore_clipboard_if_safe,
+                        args=(restore_token, text, original),
+                    )
+                    timer.daemon = True
+                    timer.start()
+                else:
+                    time.sleep(restore_delay)
+                    TextInserter._set_clipboard(original)
             return True
         except Exception as exc:
             log.exception("Text insertion failed")
@@ -86,6 +108,25 @@ class TextInserter:
                     clipboard_exc,
                 )
             return False
+
+    @classmethod
+    def _restore_clipboard_if_safe(
+        cls,
+        token: int,
+        inserted_text: str,
+        original_text: str,
+    ) -> None:
+        """Restore clipboard only if no newer paste happened and clipboard unchanged."""
+        try:
+            with cls._restore_lock:
+                if token != cls._restore_generation:
+                    return
+            current = cls._get_clipboard()
+            if current != inserted_text:
+                return
+            cls._set_clipboard(original_text)
+        except Exception as exc:
+            log.debug("Delayed clipboard restore skipped: %s", exc)
 
     @classmethod
     def _paste_delay_for_text(cls, text: str) -> float:

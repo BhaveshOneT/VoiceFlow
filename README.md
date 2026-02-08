@@ -61,6 +61,10 @@ If env vars are not set, build still works and skips signing/notarization.
 - Hotkey becomes available as soon as the speech model is ready.
 - LLM refiner loads in background and does not block recording startup.
 - First launch may download model files to `~/.cache/huggingface/`.
+- VoiceFlow logs stage timings for post-record latency:
+  - `capture_stop_ms`
+  - `Pipeline timings (ms): total, stt, clean, refine, finalize`
+  - `End-to-end post-record timings (ms): pipeline, paste, total`
 
 ## Security Notes
 
@@ -104,6 +108,14 @@ This works the same on macOS devices as long as VoiceFlow is installed in
 Log file:
 
 `~/Library/Application Support/VoiceFlow/logs/voiceflow.log`
+
+Quick latency summary:
+
+```bash
+grep -E "Pipeline timings|End-to-end post-record timings|capture_stop_ms" \
+  ~/Library/Application\ Support/VoiceFlow/logs/voiceflow.log | tail -n 40
+./scripts/latency_report.py
+```
 
 ## Requirements
 

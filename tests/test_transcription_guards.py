@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import unittest
 
+import numpy as np
+
 from app.config import AppConfig
 from app.dictionary import Dictionary
 from app.transcription import TranscriptionPipeline
@@ -108,6 +110,21 @@ class PipelineRefinementGateTests(unittest.TestCase):
         out = self.pipeline._preserve_completeness(raw, cleaned, {})
         self.assertGreater(len(out.split()), len(cleaned.split()))
         self.assertIn("setting things up", out.lower())
+
+    def test_trim_silence_reduces_decode_audio_without_cutting_speech(self) -> None:
+        speech = (0.02 * np.ones(16000, dtype=np.float32))
+        trailing = np.zeros(32000, dtype=np.float32)
+        audio = np.concatenate([speech, trailing])
+        trimmed, changed = self.pipeline._trim_silence_for_decode(audio)
+        self.assertTrue(changed)
+        self.assertLess(trimmed.size, audio.size)
+        self.assertGreaterEqual(trimmed.size, speech.size)
+
+    def test_trim_silence_keeps_all_silence_audio_unchanged(self) -> None:
+        audio = np.zeros(24000, dtype=np.float32)
+        trimmed, changed = self.pipeline._trim_silence_for_decode(audio)
+        self.assertFalse(changed)
+        self.assertEqual(trimmed.size, audio.size)
 
 
 class TextCleanerBehaviorTests(unittest.TestCase):

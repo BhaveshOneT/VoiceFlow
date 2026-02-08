@@ -7,10 +7,14 @@ of all windows, ignores mouse events, and appears on every Space.
 from __future__ import annotations
 
 import logging
+import threading
+import time
 
 import AppKit
 import Quartz
 from PyObjCTools import AppHelper
+
+from app.ui.recording_messages import message_for_elapsed
 
 log = logging.getLogger(__name__)
 
@@ -21,15 +25,20 @@ _PILL_WIDTH = 220
 _PILL_HEIGHT = 44
 _BOTTOM_MARGIN = 72  # distance from bottom of screen
 _CORNER_RADIUS = _PILL_HEIGHT / 2
+_PILL_MIN_WIDTH = 188
+_PILL_MAX_WIDTH = 304
 
 _ICON_DIAMETER = 22
 _ICON_LEFT_PADDING = 14
+_ICON_TEXT_GAP = 10
+_LABEL_RIGHT_PADDING = 16
 
 _LABEL_FONT_SIZE = 13.0
 
 _FADE_DURATION = 0.2
 _PULSE_DURATION = 1.0
 _LIFT_PIXELS = 6.0
+_LABEL_TRANSITION_DURATION = 0.16
 
 
 def _main_screen_frame() -> AppKit.NSRect:
@@ -60,10 +69,15 @@ class RecordingOverlay:
         self._dot_layer: Quartz.CALayer | None = None
         self._label: AppKit.NSTextField | None = None
         self._dot_view: AppKit.NSView | None = None
+        self._container_view: AppKit.NSView | None = None
         self._ring_layer: Quartz.CALayer | None = None
+        self._eq_layers: list[Quartz.CALayer] = []
         self._spinner: AppKit.NSProgressIndicator | None = None
         self._container_layer: Quartz.CALayer | None = None
         self._built = False
+        self._recording_started_at: float | None = None
+        self._recording_token = 0
+        self._last_label_text = ""
 
     # ------------------------------------------------------------------
     # Lazy construction (must happen on the main thread)
@@ -145,6 +159,7 @@ class RecordingOverlay:
             )
             panel.contentView().addSubview_(solid)
             container = solid
+        self._container_view = container
         self._container_layer = container.layer()
 
         # --- red dot (recording indicator) ---
@@ -175,21 +190,30 @@ class RecordingOverlay:
         dot_layer.addSublayer_(ring_layer)
         self._ring_layer = ring_layer
 
-        # Prefer waveform glyph over a generic icon.
-        try:
-            symbol = AppKit.NSImage.imageWithSystemSymbolName_accessibilityDescription_(
-                "waveform", "Recording"
-            )
-            if symbol is not None:
-                icon_view = AppKit.NSImageView.alloc().initWithFrame_(
-                    AppKit.NSMakeRect(5, 4, _ICON_DIAMETER - 10, _ICON_DIAMETER - 8)
+        # Equalizer bars look more dynamic than a static glyph.
+        self._eq_layers = []
+        bar_w = 3.0
+        bar_gap = 2.6
+        bar_h = 10.0
+        total_w = (bar_w * 3) + (bar_gap * 2)
+        start_x = (_ICON_DIAMETER - total_w) / 2
+        base_y = (_ICON_DIAMETER - bar_h) / 2
+        for idx in range(3):
+            bar = Quartz.CALayer.layer()
+            bar.setFrame_(
+                AppKit.NSMakeRect(
+                    start_x + idx * (bar_w + bar_gap),
+                    base_y,
+                    bar_w,
+                    bar_h,
                 )
-                icon_view.setImage_(symbol)
-                icon_view.setContentTintColor_(AppKit.NSColor.whiteColor())
-                icon_view.setImageScaling_(AppKit.NSImageScaleProportionallyUpOrDown)
-                dot_view.addSubview_(icon_view)
-        except Exception:
-            log.debug("SF Symbol not available for overlay icon")
+            )
+            bar.setCornerRadius_(bar_w / 2)
+            bar.setBackgroundColor_(
+                AppKit.NSColor.whiteColor().colorWithAlphaComponent_(0.95).CGColor()
+            )
+            dot_layer.addSublayer_(bar)
+            self._eq_layers.append(bar)
 
         container.addSubview_(dot_view)
         self._dot_layer = dot_layer
@@ -207,29 +231,32 @@ class RecordingOverlay:
         self._spinner = spinner
 
         # --- label ---
-        label_x = _ICON_LEFT_PADDING + _ICON_DIAMETER + 12
-        label_width = _PILL_WIDTH - label_x - 14
+        label_x = _ICON_LEFT_PADDING + _ICON_DIAMETER + _ICON_TEXT_GAP
+        label_width = _PILL_WIDTH - label_x - _LABEL_RIGHT_PADDING
         label_height = 18
-        label_y = (_PILL_HEIGHT - label_height) / 2 + 0.5
+        label_y = (_PILL_HEIGHT - label_height) / 2
         label_frame = AppKit.NSMakeRect(label_x, label_y, label_width, label_height)
-        label = AppKit.NSTextField.labelWithString_("Recording")
+        label = AppKit.NSTextField.labelWithString_("Listening...")
         label.setFrame_(label_frame)
         label.setFont_(
             AppKit.NSFont.systemFontOfSize_weight_(
                 _LABEL_FONT_SIZE, AppKit.NSFontWeightMedium
             )
         )
+        label.setWantsLayer_(True)
         label.setTextColor_(AppKit.NSColor.whiteColor())
         label.setAlignment_(AppKit.NSTextAlignmentLeft)
         label.setLineBreakMode_(AppKit.NSLineBreakByTruncatingTail)
         label.setUsesSingleLineMode_(True)
         container.addSubview_(label)
         self._label = label
+        self._last_label_text = "Listening..."
 
         panel.setAlphaValue_(0.0)
         panel.orderFront_(None)
 
         self._panel = panel
+        self._update_layout_for_text("Listening...", animated=False)
 
     # ------------------------------------------------------------------
     # Public API (thread-safe)
@@ -256,13 +283,17 @@ class RecordingOverlay:
             self._ensure_built()
             if not self._built:
                 return
-            self._label.setStringValue_("Recording")
+            self._recording_started_at = time.monotonic()
+            self._recording_token += 1
+            token = self._recording_token
+            self._set_recording_message(0.0, animated=False)
             self._dot_view.setHidden_(False)
             if self._spinner is not None:
                 self._spinner.stopAnimation_(None)
                 self._spinner.setHidden_(True)
             self._start_pulse()
             self._fade_in()
+            self._schedule_recording_tick(token)
         except Exception:
             log.exception("Error showing recording overlay")
 
@@ -271,7 +302,9 @@ class RecordingOverlay:
             self._ensure_built()
             if not self._built:
                 return
-            self._label.setStringValue_("Transcribing...")
+            self._recording_started_at = None
+            self._recording_token += 1
+            self._set_label_text("Transcribing...", animated=True)
             self._stop_pulse()
             if self._dot_view is not None:
                 self._dot_view.setHidden_(True)
@@ -286,6 +319,8 @@ class RecordingOverlay:
         try:
             if not self._built or self._panel is None:
                 return
+            self._recording_started_at = None
+            self._recording_token += 1
             self._stop_pulse()
             if self._spinner is not None:
                 self._spinner.stopAnimation_(None)
@@ -293,6 +328,114 @@ class RecordingOverlay:
             self._fade_out()
         except Exception:
             log.exception("Error hiding overlay")
+
+    def _schedule_recording_tick(self, token: int) -> None:
+        def _tick() -> None:
+            AppHelper.callAfter(self._recording_tick, token)
+
+        timer = threading.Timer(1.0, _tick)
+        timer.daemon = True
+        timer.start()
+
+    def _recording_tick(self, token: int) -> None:
+        if token != self._recording_token:
+            return
+        if self._recording_started_at is None:
+            return
+        elapsed = max(0.0, time.monotonic() - self._recording_started_at)
+        self._set_recording_message(elapsed, animated=True)
+        self._schedule_recording_tick(token)
+
+    def _set_recording_message(self, elapsed_seconds: float, animated: bool) -> None:
+        self._set_label_text(message_for_elapsed(elapsed_seconds), animated=animated)
+
+    def _set_label_text(self, text: str, animated: bool) -> None:
+        if self._label is None:
+            return
+        if text == self._last_label_text:
+            return
+        self._last_label_text = text
+        if animated:
+            try:
+                self._label.setAlphaValue_(0.0)
+            except Exception:
+                pass
+        self._label.setStringValue_(text)
+        self._update_layout_for_text(text, animated=animated)
+        if animated:
+            try:
+                AppKit.NSAnimationContext.beginGrouping()
+                AppKit.NSAnimationContext.currentContext().setDuration_(
+                    _LABEL_TRANSITION_DURATION
+                )
+                self._label.animator().setAlphaValue_(1.0)
+                AppKit.NSAnimationContext.endGrouping()
+            except Exception:
+                self._label.setAlphaValue_(1.0)
+
+    def _update_layout_for_text(self, text: str, animated: bool) -> None:
+        if self._panel is None or self._label is None or self._container_view is None:
+            return
+        font = self._label.font() or AppKit.NSFont.systemFontOfSize_(_LABEL_FONT_SIZE)
+        attrs = {AppKit.NSFontAttributeName: font}
+        text_size = AppKit.NSString.stringWithString_(text).sizeWithAttributes_(attrs)
+        desired_width = (
+            _ICON_LEFT_PADDING
+            + _ICON_DIAMETER
+            + _ICON_TEXT_GAP
+            + int(text_size.width)
+            + _LABEL_RIGHT_PADDING
+        )
+        width = max(_PILL_MIN_WIDTH, min(_PILL_MAX_WIDTH, desired_width))
+
+        panel_frame = self._panel.frame()
+        if (
+            int(panel_frame.size.width) != int(width)
+            or int(panel_frame.size.height) != int(_PILL_HEIGHT)
+        ):
+            screen = _main_screen_frame()
+            new_frame = AppKit.NSMakeRect(
+                (screen.size.width - width) / 2,
+                _BOTTOM_MARGIN,
+                width,
+                _PILL_HEIGHT,
+            )
+            self._panel.setFrame_display_(new_frame, True)
+
+        container_frame = AppKit.NSMakeRect(0, 0, width, _PILL_HEIGHT)
+        self._container_view.setFrame_(container_frame)
+        if self._container_layer is not None:
+            self._container_layer.setCornerRadius_(_PILL_HEIGHT / 2)
+
+        icon_y = (_PILL_HEIGHT - _ICON_DIAMETER) / 2
+        icon_frame = AppKit.NSMakeRect(
+            _ICON_LEFT_PADDING,
+            icon_y,
+            _ICON_DIAMETER,
+            _ICON_DIAMETER,
+        )
+        if self._dot_view is not None:
+            self._dot_view.setFrame_(icon_frame)
+        if self._spinner is not None:
+            self._spinner.setFrame_(icon_frame)
+
+        label_x = _ICON_LEFT_PADDING + _ICON_DIAMETER + _ICON_TEXT_GAP
+        label_h = 18
+        label_w = max(56, width - label_x - _LABEL_RIGHT_PADDING)
+        label_y = (_PILL_HEIGHT - label_h) / 2
+        self._label.setFrame_(AppKit.NSMakeRect(label_x, label_y, label_w, label_h))
+
+        if animated and self._container_layer is not None:
+            try:
+                pop = Quartz.CABasicAnimation.animationWithKeyPath_("transform.scale")
+                pop.setFromValue_(1.0)
+                pop.setToValue_(1.015)
+                pop.setDuration_(0.12)
+                pop.setAutoreverses_(True)
+                pop.setRepeatCount_(1)
+                self._container_layer.addAnimation_forKey_(pop, "labelPop")
+            except Exception:
+                log.debug("Label pop animation skipped")
 
     # ------------------------------------------------------------------
     # Animations
@@ -367,6 +510,14 @@ class RecordingOverlay:
             icon_pulse.setAutoreverses_(True)
             icon_pulse.setRepeatCount_(float("inf"))
             self._dot_layer.addAnimation_forKey_(icon_pulse, "iconPulse")
+            if self._container_layer is not None:
+                breathe = Quartz.CABasicAnimation.animationWithKeyPath_("transform.scale")
+                breathe.setFromValue_(1.0)
+                breathe.setToValue_(1.018)
+                breathe.setDuration_(1.4)
+                breathe.setAutoreverses_(True)
+                breathe.setRepeatCount_(float("inf"))
+                self._container_layer.addAnimation_forKey_(breathe, "containerBreathe")
 
             if self._ring_layer is not None:
                 ring_scale = Quartz.CABasicAnimation.animationWithKeyPath_("transform.scale")
@@ -390,6 +541,20 @@ class RecordingOverlay:
                 )
                 self._ring_layer.addAnimation_forKey_(group, "ringPulse")
                 self._ring_layer.setOpacity_(1.0)
+            for idx, bar in enumerate(self._eq_layers):
+                wave = Quartz.CABasicAnimation.animationWithKeyPath_("transform.scale.y")
+                wave.setFromValue_(0.32 + (idx * 0.08))
+                wave.setToValue_(1.0)
+                wave.setDuration_(0.34 + (idx * 0.07))
+                wave.setAutoreverses_(True)
+                wave.setRepeatCount_(float("inf"))
+                wave.setTimingFunction_(
+                    Quartz.CAMediaTimingFunction.functionWithName_(
+                        Quartz.kCAMediaTimingFunctionEaseInEaseOut
+                    )
+                )
+                wave.setBeginTime_(Quartz.CACurrentMediaTime() + (idx * 0.07))
+                bar.addAnimation_forKey_(wave, f"eqWave{idx}")
         except Exception:
             log.debug("Pulse animation failed (non-fatal)")
 
@@ -400,9 +565,15 @@ class RecordingOverlay:
             self._dot_layer.removeAnimationForKey_("iconPulse")
             self._dot_layer.setOpacity_(1.0)
             self._dot_layer.setTransform_(Quartz.CATransform3DIdentity)
+            if self._container_layer is not None:
+                self._container_layer.removeAnimationForKey_("containerBreathe")
+                self._container_layer.setTransform_(Quartz.CATransform3DIdentity)
             if self._ring_layer is not None:
                 self._ring_layer.removeAnimationForKey_("ringPulse")
                 self._ring_layer.setOpacity_(0.0)
                 self._ring_layer.setTransform_(Quartz.CATransform3DIdentity)
+            for idx, bar in enumerate(self._eq_layers):
+                bar.removeAnimationForKey_(f"eqWave{idx}")
+                bar.setTransform_(Quartz.CATransform3DIdentity)
         except Exception as exc:
             log.debug("Failed to stop pulse animation cleanly: %s", exc)

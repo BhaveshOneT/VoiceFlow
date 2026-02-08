@@ -7,8 +7,8 @@ import threading
 import time
 from typing import Optional
 
-from AppKit import NSPasteboard, NSPasteboardTypeString
 import Quartz
+from AppKit import NSPasteboard, NSPasteboardTypeString
 
 log = logging.getLogger(__name__)
 

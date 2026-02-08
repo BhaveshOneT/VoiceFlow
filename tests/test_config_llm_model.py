@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from app.config import AppConfig, DEFAULT_LLM_MODEL, DEFAULT_LANGUAGE
+from app.config import DEFAULT_LANGUAGE, DEFAULT_LLM_MODEL, AppConfig
 
 
 class ConfigLlmModelTests(unittest.TestCase):

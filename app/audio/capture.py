@@ -1,13 +1,13 @@
 """Real-time microphone capture using sounddevice."""
 
-from collections import deque
 import logging
 import time
+from collections import deque
+from queue import Empty, Queue
+from typing import Optional
 
 import numpy as np
 import sounddevice as sd
-from queue import Queue, Empty
-from typing import Optional
 
 log = logging.getLogger(__name__)
 

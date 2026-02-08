@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import re
 
-
 _FILLER_REMOVE: list[re.Pattern[str]] = [
     re.compile(r'\b(um+|uh+|hmm+|hm+|ah+|eh+|er+|oh+)\b', re.IGNORECASE),
     re.compile(r'\b(so yeah|and yeah|yeah so|right so)\b[.,]?', re.IGNORECASE),

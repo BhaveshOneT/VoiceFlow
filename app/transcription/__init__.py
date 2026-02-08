@@ -11,6 +11,7 @@ import numpy as np
 
 from app.config import AppConfig
 from app.dictionary import Dictionary
+
 from .text_cleaner import TextCleaner
 from .text_refiner import TextRefiner
 from .whisper_engine import WhisperEngine

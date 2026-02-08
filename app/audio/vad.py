@@ -3,14 +3,14 @@
 import hashlib
 import ssl
 import urllib.request
+from collections import deque
+from pathlib import Path
+from typing import Optional
 from urllib.parse import urlparse
 
 import certifi
 import numpy as np
 import onnxruntime as ort
-from collections import deque
-from typing import Optional
-from pathlib import Path
 
 
 class VoiceActivityDetector:

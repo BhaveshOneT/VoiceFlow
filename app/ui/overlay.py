@@ -10,6 +10,7 @@ import logging
 import math
 import threading
 import time
+from contextlib import suppress
 
 import AppKit
 import Quartz
@@ -371,10 +372,8 @@ class RecordingOverlay:
             return
         self._last_label_text = text
         if animated:
-            try:
+            with suppress(Exception):
                 self._label.setAlphaValue_(0.0)
-            except Exception:
-                pass
         self._label.setStringValue_(text)
         self._update_layout_for_text(text, animated=animated)
         if animated:

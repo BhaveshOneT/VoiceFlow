@@ -8,7 +8,6 @@ import math
 import re
 from pathlib import Path
 
-
 DEFAULT_LOG = (
     Path.home()
     / "Library"

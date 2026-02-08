@@ -3,20 +3,20 @@ from __future__ import annotations
 
 import logging
 import threading
-import subprocess
 import time
 from pathlib import Path
 
+import AppKit
 import numpy as np
 import rumps
 from PyObjCTools import AppHelper
 
+from app.audio.capture import AudioCapture
 from app.config import AppConfig
 from app.dictionary import Dictionary
-from app.audio.capture import AudioCapture
-from app.transcription import TranscriptionPipeline
 from app.input.hotkey import HotkeyListener
 from app.input.text_inserter import TextInserter
+from app.transcription import TranscriptionPipeline
 from app.ui.overlay import RecordingOverlay
 
 LOG_DIR = Path.home() / "Library" / "Application Support" / "VoiceFlow" / "logs"
@@ -553,7 +553,12 @@ class VoiceFlowApp(rumps.App):
     def _open_system_settings(self, pane: str) -> None:
         url = f"x-apple.systempreferences:com.apple.preference.security?{pane}"
         try:
-            subprocess.run(["/usr/bin/open", url], check=False)
+            ns_url = AppKit.NSURL.URLWithString_(url)
+            if ns_url is None:
+                raise ValueError(f"Invalid macOS settings URL: {url}")
+            opened = AppKit.NSWorkspace.sharedWorkspace().openURL_(ns_url)
+            if not opened:
+                raise RuntimeError(f"macOS refused to open settings URL: {url}")
         except Exception:
             log.exception("Failed to open System Settings: %s", pane)
 

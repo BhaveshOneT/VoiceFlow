@@ -141,6 +141,22 @@ _ACTION_START_RE = re.compile(
     r'(?:change|update|modify|refactor|improve|fix|rename|move|set|switch|use|call)\b',
     re.IGNORECASE,
 )
+_JS_CONTEXT_HINTS = {
+    "next",
+    "react",
+    "node",
+    "express",
+    "nest",
+    "vite",
+    "vue",
+    "nuxt",
+    "remix",
+    "solid",
+    "plate",
+}
+_JS_HOMOPHONE_RE = re.compile(r"\b(?P<base>[A-Za-z][A-Za-z0-9_-]*)\s+chess\b", re.IGNORECASE)
+_SPELLED_JS_RE = re.compile(r"\b(jay\s+ess|j\s*\.?\s*s)\b", re.IGNORECASE)
+_SPELLED_TS_RE = re.compile(r"\b(tea\s+ess|t\s*\.?\s*s)\b", re.IGNORECASE)
 _CLAUSE_SPLIT_RE = re.compile(r'(?<=[.!?;:])\s+')
 _STRONG_REPLACE_CUES = {
     "no no",
@@ -165,6 +181,7 @@ class TextCleaner:
             text = pattern.sub('', text)
         text = _FILLER_REPLACE_SPACE.sub(' ', text)
         text = _REPEATED_WORD.sub(cls._dedupe_repeated_word, text)
+        text = cls._normalize_spoken_acronyms(text)
 
         if dictionary:
             for wrong, right in sorted(dictionary.items(), key=lambda kv: -len(kv[0])):
@@ -189,6 +206,7 @@ class TextCleaner:
             text = pattern.sub('', text)
         text = _FILLER_REPLACE_SPACE.sub(' ', text)
         text = _REPEATED_WORD.sub(cls._dedupe_repeated_word, text)
+        text = cls._normalize_spoken_acronyms(text)
         if dictionary:
             for wrong, right in sorted(dictionary.items(), key=lambda kv: -len(kv[0])):
                 text = re.sub(re.escape(wrong), right, text, flags=re.IGNORECASE)
@@ -377,3 +395,16 @@ class TextCleaner:
             return match.group(0)
         tag = re.sub(r"\s+", "_", base.strip())
         return f"@ {tag}"
+
+    @classmethod
+    def _normalize_spoken_acronyms(cls, text: str) -> str:
+        text = _SPELLED_JS_RE.sub("JS", text)
+        text = _SPELLED_TS_RE.sub("TS", text)
+
+        def _js_homophone(match: re.Match[str]) -> str:
+            base = match.group("base")
+            if base.lower() in _JS_CONTEXT_HINTS:
+                return f"{base} JS"
+            return match.group(0)
+
+        return _JS_HOMOPHONE_RE.sub(_js_homophone, text)

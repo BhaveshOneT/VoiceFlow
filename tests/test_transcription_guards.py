@@ -155,6 +155,15 @@ class TextCleanerBehaviorTests(unittest.TestCase):
         self.assertIn("we should enable this for all users", cleaned)
         self.assertIn("not all users yet", cleaned)
 
+    def test_short_technical_phrase_rescues_js_homophone(self) -> None:
+        dictionary = {"plate js": "Plate.js"}
+        cleaned = TextCleaner.clean("please update plate chess file", dictionary)
+        self.assertIn("Plate.js", cleaned)
+
+    def test_js_homophone_not_applied_to_plain_chess_sentence(self) -> None:
+        cleaned = TextCleaner.clean("we should play chess later")
+        self.assertEqual(cleaned.lower(), "we should play chess later")
+
 
 if __name__ == "__main__":
     unittest.main()

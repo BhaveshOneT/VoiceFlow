@@ -292,6 +292,11 @@ class TextCleanerBehaviorTests(unittest.TestCase):
         self.assertNotIn("release @notes.md", cleaned)
         self.assertIn("rename @release-notes.md to @release-notes.md", cleaned)
 
+    def test_merges_prefixed_filename_with_the_file_phrase(self) -> None:
+        cleaned = TextCleaner.clean("update the file release notes.md").lower()
+        self.assertIn("update the file @release-notes.md", cleaned)
+        self.assertNotIn("release @notes.md", cleaned)
+
     def test_does_not_tag_framework_terms_as_files(self) -> None:
         cleaned = TextCleaner.clean("technical terms like next.js and plate.js")
         self.assertNotIn("@next.js", cleaned.lower())

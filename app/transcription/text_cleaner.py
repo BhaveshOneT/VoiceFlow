@@ -217,6 +217,7 @@ _MISSING_SENTENCE_BREAK_RE = re.compile(
 )
 _VERB_PREFIX_TAG_FILE_RE = re.compile(
     rf"\b(?P<verb>rename|update|modify|edit|open|create|delete|move|copy)\s+"
+    rf"(?P<middle>(?:(?:the|this|that)\s+)?(?:file\s+)?)?"
     rf"(?P<prefix>[A-Za-z0-9_-]{{2,}})\s+@(?P<name>[A-Za-z0-9_-]+\.(?:{_FILE_EXT_ALT}))\b",
     re.IGNORECASE,
 )
@@ -589,6 +590,7 @@ class TextCleaner:
     @staticmethod
     def _merge_prefixed_tagged_file(match: re.Match[str]) -> str:
         verb = match.group("verb")
+        middle = (match.group("middle") or "").strip()
         prefix = match.group("prefix")
         name = match.group("name")
         lowered_name = name.lower()
@@ -597,6 +599,8 @@ class TextCleaner:
             f"{lowered_prefix}_"
         ):
             return match.group(0)
+        if middle:
+            return f"{verb} {middle} @{prefix}-{name}"
         return f"{verb} @{prefix}-{name}"
 
     @staticmethod

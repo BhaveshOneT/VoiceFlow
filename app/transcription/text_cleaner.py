@@ -103,7 +103,7 @@ _SPOKEN_DOT_FILE_RE = re.compile(
     rf'(?P<ext>{_FILE_EXT_ALT})\b(?:\s+file\b)?',
     re.IGNORECASE,
 )
-_DUPLICATE_FILE_TAG_RE = re.compile(r'@\s+@\s+')
+_DUPLICATE_FILE_TAG_RE = re.compile(r'@\s*@\s*')
 _BARE_FILE_START_BLOCK = (
     "a|an|the|this|that|my|your|our|their|open|close|read|write|save|edit|"
     "modify|update|change|fix|move|rename|create|delete|remove|use|call|set|"
@@ -175,7 +175,7 @@ _GENERIC_SYMBOLS = {
     "interface",
 }
 _DUPLICATE_SYMBOL_TAG_RE = re.compile(
-    r"(@\s+[A-Za-z_][A-Za-z0-9_.:-]*)(?:\s+\1)+"
+    r"(@[A-Za-z_][A-Za-z0-9_.:-]*)(?:\s+\1)+"
 )
 _CLAUSE_SPLIT_RE = re.compile(r'(?<=[.!?;:])\s+')
 _STRONG_REPLACE_CUES = {
@@ -383,7 +383,7 @@ class TextCleaner:
         text = _SPOKEN_DOT_FILE_RE.sub(cls._replace_spoken_file, text)
         text = _EXPLICIT_FILE_RE.sub(cls._replace_explicit_file, text)
         text = _BARE_FILE_RE.sub(cls._replace_bare_file, text)
-        text = _DUPLICATE_FILE_TAG_RE.sub("@ ", text)
+        text = _DUPLICATE_FILE_TAG_RE.sub("@", text)
         return text
 
     @classmethod
@@ -417,12 +417,12 @@ class TextCleaner:
     def _replace_spoken_file(match: re.Match[str]) -> str:
         base = match.group("base")
         ext = match.group("ext").lower()
-        return f"@ {base}.{ext}"
+        return f"@{base}.{ext}"
 
     @staticmethod
     def _replace_explicit_file(match: re.Match[str]) -> str:
         name = match.group("name")
-        return f"@ {name}"
+        return f"@{name}"
 
     @staticmethod
     def _replace_bare_file(match: re.Match[str]) -> str:
@@ -431,7 +431,7 @@ class TextCleaner:
         if lowered in _GENERIC_FILE_BASES:
             return match.group(0)
         tag = re.sub(r"\s+", "_", base.strip())
-        return f"@ {tag}"
+        return f"@{tag}"
 
     @staticmethod
     def _replace_symbol_mention(match: re.Match[str]) -> str:
@@ -445,9 +445,9 @@ class TextCleaner:
             return full
         if _SYMBOL_FILE_EXT_RE.search(normalized):
             return full
-        if f"@ {normalized}" in full:
+        if f"@{normalized}" in full:
             return full
-        return f"{full} @ {normalized}"
+        return f"{full} @{normalized}"
 
     @classmethod
     def _normalize_spoken_acronyms(cls, text: str) -> str:

@@ -196,7 +196,7 @@ class PipelineRefinementGateTests(unittest.TestCase):
         ):
             result = pipeline.process(audio)
         self.assertIn("function.py", result.lower())
-        self.assertNotIn("@ function.py", result.lower())
+        self.assertNotIn("@function.py", result.lower())
 
     def test_process_programmer_mode_tags_file(self) -> None:
         config = AppConfig(cleanup_mode="fast", transcription_mode="programmer")
@@ -212,7 +212,7 @@ class PipelineRefinementGateTests(unittest.TestCase):
             return_value="please update function.py file",
         ):
             result = pipeline.process(audio)
-        self.assertIn("@ function.py", result.lower())
+        self.assertIn("@function.py", result.lower())
 
     def test_adaptive_transcribe_merges_chunks(self) -> None:
         config = AppConfig(cleanup_mode="fast")
@@ -248,33 +248,33 @@ class TextCleanerBehaviorTests(unittest.TestCase):
         cleaned = TextCleaner.clean(text)
         self.assertIn("we have a problem in the app", cleaned.lower())
         self.assertIn("i want to modify", cleaned.lower())
-        self.assertIn("@ text_refiner", cleaned.lower())
-        self.assertNotIn("@ functions", cleaned.lower())
+        self.assertIn("@text_refiner", cleaned.lower())
+        self.assertNotIn("@functions", cleaned.lower())
 
     def test_tags_explicit_and_spoken_file_names(self) -> None:
         explicit = TextCleaner.clean("please update function.py file")
         spoken = TextCleaner.clean("please update function dot py file")
-        self.assertIn("@ function.py", explicit)
-        self.assertIn("@ function.py", spoken)
+        self.assertIn("@function.py", explicit)
+        self.assertIn("@function.py", spoken)
 
     def test_normal_mode_skips_file_tagging(self) -> None:
         cleaned = TextCleaner.clean(
             "please update function.py file",
             programmer_mode=False,
         )
-        self.assertNotIn("@ function.py", cleaned.lower())
+        self.assertNotIn("@function.py", cleaned.lower())
         self.assertIn("function.py", cleaned.lower())
 
     def test_programmer_mode_tags_symbol_mentions(self) -> None:
         cleaned = TextCleaner.clean("please refactor function parse_request")
-        self.assertIn("@ parse_request", cleaned)
+        self.assertIn("@parse_request", cleaned)
 
     def test_normal_mode_skips_symbol_tagging(self) -> None:
         cleaned = TextCleaner.clean(
             "please refactor function parse_request",
             programmer_mode=False,
         )
-        self.assertNotIn("@ parse_request", cleaned)
+        self.assertNotIn("@parse_request", cleaned)
 
     def test_bare_generic_file_reference_is_not_tagged(self) -> None:
         cleaned = TextCleaner.clean("please open the file")

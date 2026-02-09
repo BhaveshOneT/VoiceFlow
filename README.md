@@ -13,8 +13,8 @@ Hold `Right Cmd`, speak, release, and VoiceFlow inserts cleaned text into the fo
 - Optional auto mode switching by active app (`Terminal`, `Codex`, `Claude`, editors)
 - Built-in cleanup for filler words and self-corrections (`"no no", "sorry", "I mean"`)
 - File mention tagging, for example:
-  - `"update function.py file"` -> `@ function.py`
-  - `"modify text refiner file"` -> `@ text_refiner`
+  - `"update function.py file"` -> `@function.py`
+  - `"modify text refiner file"` -> `@text_refiner`
 - Language modes:
   - `Auto (English + German)`
   - `English`

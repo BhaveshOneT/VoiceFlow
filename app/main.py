@@ -47,6 +47,18 @@ RESOURCES = Path(__file__).parent / "resources"
 # Minimum audio length (in samples at 16 kHz) to bother transcribing.
 # 0.3 seconds = 4800 samples -- anything shorter is almost certainly noise.
 _MIN_AUDIO_SAMPLES = 4800
+_PROGRAMMER_BUNDLE_HINTS = (
+    "com.apple.terminal",
+    "com.googlecode.iterm2",
+    "dev.warp.warp-stable",
+    "com.microsoft.vscode",
+    "com.todesktop.230313mzl4w4u92",
+    "com.todesktop.230313mzl4w4u92.helper",
+    "com.anthropic.claudefordesktop",
+    "com.openai.codex",
+    "com.github.atom",
+    "com.jetbrains.",
+)
 
 
 def _check_accessibility() -> bool:
@@ -100,9 +112,18 @@ class VoiceFlowApp(rumps.App):
         self._programmer_mode_item = rumps.MenuItem(
             "Programmer Mode", callback=self._set_transcription_mode_programmer
         )
+        self._auto_mode_switch_item = rumps.MenuItem(
+            "Auto-switch by active app",
+            callback=self._toggle_auto_mode_switch,
+        )
         transcription_mode_menu = rumps.MenuItem("Transcription Mode")
         transcription_mode_menu.update(
-            [self._normal_mode_item, self._programmer_mode_item]
+            [
+                self._normal_mode_item,
+                self._programmer_mode_item,
+                None,
+                self._auto_mode_switch_item,
+            ]
         )
 
         self._fast_item = rumps.MenuItem("Fast Mode", callback=self._set_fast_mode)
@@ -180,6 +201,7 @@ class VoiceFlowApp(rumps.App):
                 log.debug("Still processing previous audio; ignoring new recording")
                 return
         log.info("Recording started")
+        self._apply_auto_transcription_mode()
         try:
             self.audio.drain()
             self.audio.start()
@@ -421,10 +443,75 @@ class VoiceFlowApp(rumps.App):
         label = "Programmer" if mode == "programmer" else "Normal"
         self._set_status(f"{label} transcription mode")
 
+    def _toggle_auto_mode_switch(self, sender: rumps.MenuItem) -> None:
+        enabled = not self.config.auto_mode_switch
+        self.config.auto_mode_switch = enabled
+        self.config.save()
+        self._sync_transcription_mode_checkmarks()
+        state = "enabled" if enabled else "disabled"
+        self._set_status(f"Auto mode switch {state}")
+
     def _sync_transcription_mode_checkmarks(self) -> None:
         mode = self.config.transcription_mode
         self._normal_mode_item.state = mode == "normal"
         self._programmer_mode_item.state = mode == "programmer"
+        self._auto_mode_switch_item.state = bool(self.config.auto_mode_switch)
+
+    def _apply_auto_transcription_mode(self) -> None:
+        """Switch mode from the currently focused app when auto-switch is enabled."""
+        if not self.config.auto_mode_switch:
+            return
+        app_name, bundle_id = self._frontmost_app_info()
+        desired = self._infer_transcription_mode_for_app(
+            app_name=app_name,
+            bundle_id=bundle_id,
+            programmer_hints=self.config.programmer_apps,
+        )
+        if desired == self.config.transcription_mode:
+            return
+        log.info(
+            "Auto-switching transcription mode to %s (frontmost app=%s, bundle=%s)",
+            desired,
+            app_name or "<unknown>",
+            bundle_id or "<unknown>",
+        )
+        try:
+            self.pipeline.set_transcription_mode(desired)
+            self.config.transcription_mode = desired
+            self.config.save()
+            self._sync_transcription_mode_checkmarks()
+        except Exception:
+            log.exception("Failed auto-switching transcription mode to %s", desired)
+
+    @staticmethod
+    def _frontmost_app_info() -> tuple[str, str]:
+        try:
+            app = AppKit.NSWorkspace.sharedWorkspace().frontmostApplication()
+            if app is None:
+                return "", ""
+            name = str(app.localizedName() or "")
+            bundle_id = str(app.bundleIdentifier() or "")
+            return name, bundle_id
+        except Exception:
+            log.debug("Could not resolve frontmost app", exc_info=True)
+            return "", ""
+
+    @staticmethod
+    def _infer_transcription_mode_for_app(
+        app_name: str,
+        bundle_id: str,
+        programmer_hints: list[str],
+    ) -> str:
+        app_name_l = app_name.strip().lower()
+        bundle_l = bundle_id.strip().lower()
+        hints = [hint.strip().lower() for hint in programmer_hints if hint.strip()]
+        if any(hint in app_name_l for hint in hints):
+            return "programmer"
+        if any(hint in bundle_l for hint in hints):
+            return "programmer"
+        if any(bundle_hint in bundle_l for bundle_hint in _PROGRAMMER_BUNDLE_HINTS):
+            return "programmer"
+        return "normal"
 
     def _set_language_auto(self, sender: rumps.MenuItem) -> None:
         self._switch_language("auto")

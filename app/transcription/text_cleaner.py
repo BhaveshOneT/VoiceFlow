@@ -156,6 +156,27 @@ _JS_CONTEXT_HINTS = {
 _JS_HOMOPHONE_RE = re.compile(r"\b(?P<base>[A-Za-z][A-Za-z0-9_-]*)\s+chess\b", re.IGNORECASE)
 _SPELLED_JS_RE = re.compile(r"\b(jay\s+ess|j\s*\.?\s*s)\b", re.IGNORECASE)
 _SPELLED_TS_RE = re.compile(r"\b(tea\s+ess|t\s*\.?\s*s)\b", re.IGNORECASE)
+_SYMBOL_MENTION_RE = re.compile(
+    r"\b(?P<verb>update|modify|refactor|fix|rename|call|use|create|open|check|test)\s+"
+    r"(?:the\s+)?(?P<kind>function|method|class|module|variable|interface|type)\s+"
+    r"(?P<name>[A-Za-z_][A-Za-z0-9_.:-]{1,64})\b",
+    re.IGNORECASE,
+)
+_SYMBOL_FILE_EXT_RE = re.compile(rf"\.(?:{_FILE_EXT_ALT})$", re.IGNORECASE)
+_GENERIC_SYMBOLS = {
+    "code",
+    "file",
+    "app",
+    "function",
+    "class",
+    "module",
+    "variable",
+    "type",
+    "interface",
+}
+_DUPLICATE_SYMBOL_TAG_RE = re.compile(
+    r"(@\s+[A-Za-z_][A-Za-z0-9_.:-]*)(?:\s+\1)+"
+)
 _CLAUSE_SPLIT_RE = re.compile(r'(?<=[.!?;:])\s+')
 _STRONG_REPLACE_CUES = {
     "no no",
@@ -195,6 +216,7 @@ class TextCleaner:
         text = cls._collapse_repeated_clauses(text)
         if programmer_mode:
             text = cls._tag_file_mentions(text)
+            text = cls._tag_symbol_mentions(text)
         text = re.sub(r'\s{2,}', ' ', text)
         text = re.sub(r'\s+([.,!?;:])', r'\1', text)
         text = re.sub(r'^[,\s]+', '', text)
@@ -219,6 +241,7 @@ class TextCleaner:
         text = cls._collapse_repeated_clauses(text)
         if programmer_mode:
             text = cls._tag_file_mentions(text)
+            text = cls._tag_symbol_mentions(text)
         text = re.sub(r'\s{2,}', ' ', text)
         text = re.sub(r'\s+([.,!?;:])', r'\1', text)
         text = re.sub(r'^[,\s]+', '', text)
@@ -363,6 +386,13 @@ class TextCleaner:
         text = _DUPLICATE_FILE_TAG_RE.sub("@ ", text)
         return text
 
+    @classmethod
+    def _tag_symbol_mentions(cls, text: str) -> str:
+        """Tag explicit symbol mentions for programmer-focused prompts."""
+        tagged = _SYMBOL_MENTION_RE.sub(cls._replace_symbol_mention, text)
+        tagged = _DUPLICATE_SYMBOL_TAG_RE.sub(r"\1", tagged)
+        return tagged
+
     @staticmethod
     def _collapse_repeated_clauses(text: str) -> str:
         """Collapse immediate repeated clauses (common ASR loop artifact)."""
@@ -402,6 +432,22 @@ class TextCleaner:
             return match.group(0)
         tag = re.sub(r"\s+", "_", base.strip())
         return f"@ {tag}"
+
+    @staticmethod
+    def _replace_symbol_mention(match: re.Match[str]) -> str:
+        full = match.group(0)
+        name = match.group("name").strip()
+        normalized = name.strip(".,!?;:")
+        if not normalized:
+            return full
+        lowered = normalized.lower()
+        if lowered in _GENERIC_SYMBOLS:
+            return full
+        if _SYMBOL_FILE_EXT_RE.search(normalized):
+            return full
+        if f"@ {normalized}" in full:
+            return full
+        return f"{full} @ {normalized}"
 
     @classmethod
     def _normalize_spoken_acronyms(cls, text: str) -> str:

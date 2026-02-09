@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from unittest import mock
 
 import numpy as np
 
@@ -180,6 +181,63 @@ class PipelineRefinementGateTests(unittest.TestCase):
         self.pipeline.set_transcription_mode("normal")
         self.assertFalse(self.pipeline._programmer_mode_enabled())
 
+    def test_process_normal_mode_skips_file_tagging(self) -> None:
+        config = AppConfig(cleanup_mode="fast", transcription_mode="normal")
+        pipeline = TranscriptionPipeline(config=config, dictionary=Dictionary())
+        audio = np.ones(16000, dtype=np.float32)
+        with mock.patch.object(
+            pipeline,
+            "_trim_silence_for_decode",
+            return_value=(audio, False),
+        ), mock.patch.object(
+            pipeline,
+            "_transcribe_adaptive",
+            return_value="please update function.py file",
+        ):
+            result = pipeline.process(audio)
+        self.assertIn("function.py", result.lower())
+        self.assertNotIn("@ function.py", result.lower())
+
+    def test_process_programmer_mode_tags_file(self) -> None:
+        config = AppConfig(cleanup_mode="fast", transcription_mode="programmer")
+        pipeline = TranscriptionPipeline(config=config, dictionary=Dictionary())
+        audio = np.ones(16000, dtype=np.float32)
+        with mock.patch.object(
+            pipeline,
+            "_trim_silence_for_decode",
+            return_value=(audio, False),
+        ), mock.patch.object(
+            pipeline,
+            "_transcribe_adaptive",
+            return_value="please update function.py file",
+        ):
+            result = pipeline.process(audio)
+        self.assertIn("@ function.py", result.lower())
+
+    def test_adaptive_transcribe_merges_chunks(self) -> None:
+        config = AppConfig(cleanup_mode="fast")
+        pipeline = TranscriptionPipeline(config=config, dictionary=Dictionary())
+        long_audio = np.zeros(int(16000 * 130), dtype=np.float32)
+        responses = iter(
+            [
+                "we should update parser module and run tests before merge",
+                "and run tests before merge then deploy to staging",
+                "then deploy to staging and monitor metrics",
+                "final note include rollback checklist",
+            ]
+        )
+
+        with mock.patch.object(
+            pipeline,
+            "_transcribe_with_fallback",
+            side_effect=lambda *_args, **_kwargs: next(responses),
+        ) as mocked:
+            merged = pipeline._transcribe_adaptive(long_audio, tech_context="")
+
+        self.assertGreaterEqual(mocked.call_count, 3)
+        self.assertIn("deploy to staging", merged.lower())
+        self.assertIn("rollback checklist", merged.lower())
+
 
 class TextCleanerBehaviorTests(unittest.TestCase):
     def test_no_no_correction_preserves_sentence_context(self) -> None:
@@ -206,6 +264,17 @@ class TextCleanerBehaviorTests(unittest.TestCase):
         )
         self.assertNotIn("@ function.py", cleaned.lower())
         self.assertIn("function.py", cleaned.lower())
+
+    def test_programmer_mode_tags_symbol_mentions(self) -> None:
+        cleaned = TextCleaner.clean("please refactor function parse_request")
+        self.assertIn("@ parse_request", cleaned)
+
+    def test_normal_mode_skips_symbol_tagging(self) -> None:
+        cleaned = TextCleaner.clean(
+            "please refactor function parse_request",
+            programmer_mode=False,
+        )
+        self.assertNotIn("@ parse_request", cleaned)
 
     def test_bare_generic_file_reference_is_not_tagged(self) -> None:
         cleaned = TextCleaner.clean("please open the file")

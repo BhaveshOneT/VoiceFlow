@@ -10,6 +10,7 @@ Hold `Right Cmd`, speak, release, and VoiceFlow inserts cleaned text into the fo
 - Two transcription modes:
   - `Programmer Mode` (code-aware terms, file tagging)
   - `Normal Mode` (clean dictation without code-specific tagging)
+- Optional auto mode switching by active app (`Terminal`, `Codex`, `Claude`, editors)
 - Built-in cleanup for filler words and self-corrections (`"no no", "sorry", "I mean"`)
 - File mention tagging, for example:
   - `"update function.py file"` -> `@ function.py`
@@ -120,6 +121,15 @@ grep -E "Pipeline timings|End-to-end post-record timings|capture_stop_ms" \
   ~/Library/Application\ Support/VoiceFlow/logs/voiceflow.log | tail -n 40
 ./scripts/latency_report.py
 ```
+
+## CI Quality Gates
+
+GitHub Actions runs quality gates on push/PR to `main`:
+
+- `ruff` lint checks
+- unit tests
+- `bandit` security scan
+- `pip-audit` dependency vulnerability scan
 
 ## Requirements
 

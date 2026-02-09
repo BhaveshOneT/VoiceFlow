@@ -30,6 +30,14 @@ class ConfigLlmModelTests(unittest.TestCase):
         cfg = AppConfig(transcription_mode="general")
         self.assertEqual(cfg.transcription_mode, "normal")
 
+    def test_auto_mode_switch_defaults_enabled(self) -> None:
+        cfg = AppConfig()
+        self.assertTrue(cfg.auto_mode_switch)
+
+    def test_programmer_apps_normalized(self) -> None:
+        cfg = AppConfig(programmer_apps=[" Terminal ", "Codex "])
+        self.assertEqual(cfg.programmer_apps, ["terminal", "codex"])
+
 
 if __name__ == "__main__":
     unittest.main()

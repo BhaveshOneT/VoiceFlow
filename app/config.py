@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 log = logging.getLogger(__name__)
@@ -43,11 +43,31 @@ _TRANSCRIPTION_MODE_ALIASES = {
     "coding": "programmer",
     "developer": "programmer",
 }
+_DEFAULT_PROGRAMMER_APPS = [
+    "codex",
+    "claude",
+    "terminal",
+    "iterm",
+    "warp",
+    "cursor",
+    "visual studio code",
+    "vscode",
+    "code",
+    "xcode",
+    "zed",
+    "sublime text",
+    "jetbrains",
+    "pycharm",
+    "webstorm",
+    "intellij",
+]
 
 
 @dataclass
 class AppConfig:
     transcription_mode: str = "programmer"
+    auto_mode_switch: bool = True
+    programmer_apps: list[str] = field(default_factory=lambda: list(_DEFAULT_PROGRAMMER_APPS))
     recording_mode: str = "push_to_talk"
     hotkey: str = "right_cmd"
     silence_duration_ms: int = 700
@@ -77,6 +97,17 @@ class AppConfig:
             str(self.transcription_mode).strip().lower(),
             "programmer",
         )
+        self.auto_mode_switch = bool(self.auto_mode_switch)
+        if isinstance(self.programmer_apps, str):
+            raw_apps = self.programmer_apps.split(",")
+        elif isinstance(self.programmer_apps, list):
+            raw_apps = self.programmer_apps
+        else:
+            raw_apps = []
+        cleaned_apps = [
+            str(item).strip().lower() for item in raw_apps if str(item).strip()
+        ]
+        self.programmer_apps = cleaned_apps or list(_DEFAULT_PROGRAMMER_APPS)
         if not self.llm_model:
             self.llm_model = DEFAULT_LLM_MODEL
         self.llm_model = _LLM_MODEL_ALIASES.get(self.llm_model, self.llm_model)
@@ -98,6 +129,8 @@ class AppConfig:
                     or filtered.get("llm_model") != config.llm_model
                     or filtered.get("transcription_mode")
                     != config.transcription_mode
+                    or filtered.get("auto_mode_switch") != config.auto_mode_switch
+                    or filtered.get("programmer_apps") != config.programmer_apps
                 ):
                     config.save()
                 return config

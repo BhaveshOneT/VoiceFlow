@@ -113,6 +113,12 @@ _SPOKEN_DOT_FILE_RE = re.compile(
     rf'(?P<ext>{_FILE_EXT_ALT})\b(?:\s+file\b)?',
     re.IGNORECASE,
 )
+_SPOKEN_COMPLEX_FILE_RE = re.compile(
+    rf'(?<![\w@])(?P<base>[A-Za-z0-9][A-Za-z0-9_-]*'
+    r'(?:\s+(?:underscore|under score|dash|hyphen)\s+[A-Za-z0-9][A-Za-z0-9_-]*)+)'
+    rf'\s+dot\s+(?P<ext>{_FILE_EXT_ALT})\b(?:\s+file\b)?',
+    re.IGNORECASE,
+)
 _DUPLICATE_FILE_TAG_RE = re.compile(r'@\s*@\s*')
 _BARE_FILE_START_BLOCK = (
     "a|an|the|this|that|my|your|our|their|open|close|read|write|save|edit|"
@@ -206,6 +212,34 @@ _TRAILING_CONJUNCTION_RE = re.compile(
     r"\b(?:and|or|but|so|because|then)\b\s*$",
     re.IGNORECASE,
 )
+_FRAGMENTED_TAG_RE = re.compile(
+    rf'@(?P<left>[A-Za-z0-9_-]+)(?P<sep>[-_])@(?P<right>[A-Za-z0-9_-]+\.(?:{_FILE_EXT_ALT}))\b',
+    re.IGNORECASE,
+)
+_SPOKEN_FRAGMENTED_TAG_RE = re.compile(
+    rf'(?<![@\w])(?P<left>[A-Za-z0-9_-]+)\s+'
+    r'(?P<sep>underscore|under score|dash|hyphen)\s+'
+    rf'@(?P<right>[A-Za-z0-9_-]+\.(?:{_FILE_EXT_ALT}))\b',
+    re.IGNORECASE,
+)
+_FRAMEWORK_FILE_TOKENS = {
+    "next.js",
+    "node.js",
+    "react.js",
+    "plate.js",
+    "vue.js",
+    "nuxt.js",
+    "solid.js",
+    "svelte.js",
+    "express.js",
+}
+_TAGGED_JS_LIST_RE = re.compile(
+    r'(?P<prefix>\b(?:terms?|libraries|frameworks?)\s+like\s+)'
+    r'(?P<body>@[A-Za-z0-9_-]+\.(?:js|jsx|ts|tsx)\b'
+    r'(?:\s*,\s*@[A-Za-z0-9_-]+\.(?:js|jsx|ts|tsx)\b)*'
+    r'(?:\s+and\s+@[A-Za-z0-9_-]+\.(?:js|jsx|ts|tsx)\b)?)',
+    re.IGNORECASE,
+)
 _STRONG_REPLACE_CUES = {
     "no no",
     "no wait",
@@ -246,6 +280,7 @@ class TextCleaner:
 
         text = cls._apply_self_corrections(text)
         text = cls._collapse_repeated_clauses(text)
+        text = cls._dedupe_adjacent_sentences(text)
         text = cls._prune_low_information_fragments(text)
         if programmer_mode:
             text = cls._tag_file_mentions(text)
@@ -279,6 +314,7 @@ class TextCleaner:
             for wrong, right in sorted(dictionary.items(), key=lambda kv: -len(kv[0])):
                 text = re.sub(re.escape(wrong), right, text, flags=re.IGNORECASE)
         text = cls._collapse_repeated_clauses(text)
+        text = cls._dedupe_adjacent_sentences(text)
         text = cls._prune_low_information_fragments(text)
         if programmer_mode:
             text = cls._tag_file_mentions(text)
@@ -424,11 +460,15 @@ class TextCleaner:
     @classmethod
     def _tag_file_mentions(cls, text: str) -> str:
         """Turn spoken or explicit file mentions into @-style file tags."""
+        text = _SPOKEN_COMPLEX_FILE_RE.sub(cls._replace_spoken_complex_file, text)
         text = _SPOKEN_DOT_FILE_RE.sub(cls._replace_spoken_file, text)
         text = _EXPLICIT_FILE_RE.sub(cls._replace_explicit_file, text)
         text = _BARE_FILE_RE.sub(cls._replace_bare_file, text)
         text = _DUPLICATE_FILE_TAG_RE.sub("@", text)
         text = _LONE_EXTENSION_TAG_RE.sub(r"\g<ext>", text)
+        text = _FRAGMENTED_TAG_RE.sub(cls._merge_fragmented_tags, text)
+        text = _SPOKEN_FRAGMENTED_TAG_RE.sub(cls._merge_spoken_fragmented_tag, text)
+        text = _TAGGED_JS_LIST_RE.sub(cls._untag_js_list, text)
         return text
 
     @classmethod
@@ -454,6 +494,25 @@ class TextCleaner:
             word_count = len(norm.split())
             if norm == prev_norm and word_count >= 3:
                 continue
+            if prev_norm and word_count >= 10 and prev_norm.endswith(norm):
+                continue
+            out.append(chunk)
+            prev_norm = norm
+        return " ".join(out) if out else text
+
+    @staticmethod
+    def _dedupe_adjacent_sentences(text: str) -> str:
+        """Drop duplicated adjacent sentences while preserving order."""
+        chunks = [chunk.strip() for chunk in _SENTENCE_SPLIT.split(text.strip()) if chunk.strip()]
+        if len(chunks) < 2:
+            return text
+
+        out: list[str] = []
+        prev_norm = ""
+        for chunk in chunks:
+            norm = TextCleaner._normalize_fragment(chunk)
+            if norm and norm == prev_norm and len(norm.split()) >= 6:
+                continue
             out.append(chunk)
             prev_norm = norm
         return " ".join(out) if out else text
@@ -465,8 +524,19 @@ class TextCleaner:
         return f"@{base}.{ext}"
 
     @staticmethod
+    def _replace_spoken_complex_file(match: re.Match[str]) -> str:
+        base = match.group("base").strip()
+        ext = match.group("ext").lower()
+        base = re.sub(r"\s+(?:underscore|under score)\s+", "_", base, flags=re.IGNORECASE)
+        base = re.sub(r"\s+(?:dash|hyphen)\s+", "-", base, flags=re.IGNORECASE)
+        base = re.sub(r"\s+", "_", base)
+        return f"@{base}.{ext}"
+
+    @staticmethod
     def _replace_explicit_file(match: re.Match[str]) -> str:
         name = match.group("name")
+        if name.lower() in _FRAMEWORK_FILE_TOKENS:
+            return name
         return f"@{name}"
 
     @staticmethod
@@ -493,6 +563,20 @@ class TextCleaner:
         if f"@{normalized}" in full:
             return full
         return f"{full} @{normalized}"
+
+    @staticmethod
+    def _merge_fragmented_tags(match: re.Match[str]) -> str:
+        return f"@{match.group('left')}{match.group('sep')}{match.group('right')}"
+
+    @staticmethod
+    def _merge_spoken_fragmented_tag(match: re.Match[str]) -> str:
+        sep = "_" if "under" in match.group("sep").lower() else "-"
+        return f"@{match.group('left')}{sep}{match.group('right')}"
+
+    @staticmethod
+    def _untag_js_list(match: re.Match[str]) -> str:
+        body = match.group("body").replace("@", "")
+        return f"{match.group('prefix')}{body}"
 
     @classmethod
     def _normalize_spoken_acronyms(cls, text: str) -> str:

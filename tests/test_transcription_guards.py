@@ -271,6 +271,32 @@ class TextCleanerBehaviorTests(unittest.TestCase):
         self.assertNotIn("@dmg", cleaned.lower())
         self.assertIn("dmg", cleaned.lower())
 
+    def test_spoken_complex_filenames_are_tagged(self) -> None:
+        cleaned = TextCleaner.clean(
+            "update text underscore refiner dot py and docker dash compose dot yml"
+        ).lower()
+        self.assertIn("@text_refiner.py", cleaned)
+        self.assertIn("@docker-compose.yml", cleaned)
+
+    def test_merges_fragmented_filename_tags(self) -> None:
+        cleaned = TextCleaner.clean(
+            "update text underscore @refiner.py and @docker-@compose.yml"
+        ).lower()
+        self.assertIn("@text_refiner.py", cleaned)
+        self.assertIn("@docker-compose.yml", cleaned)
+
+    def test_does_not_tag_framework_terms_as_files(self) -> None:
+        cleaned = TextCleaner.clean("technical terms like next.js and plate.js")
+        self.assertNotIn("@next.js", cleaned.lower())
+        self.assertNotIn("@plate.js", cleaned.lower())
+
+    def test_untags_framework_list_with_existing_prefixes(self) -> None:
+        cleaned = TextCleaner.clean("technical terms like @next.js, @play.js and @plate.js")
+        self.assertIn("technical terms like next.js, play.js and plate.js", cleaned.lower())
+        self.assertNotIn("@next.js", cleaned.lower())
+        self.assertNotIn("@play.js", cleaned.lower())
+        self.assertNotIn("@plate.js", cleaned.lower())
+
     def test_normal_mode_skips_file_tagging(self) -> None:
         cleaned = TextCleaner.clean(
             "please update function.py file",
@@ -298,6 +324,19 @@ class TextCleanerBehaviorTests(unittest.TestCase):
         text = "we should ship today. we should ship today. we should ship today."
         cleaned = TextCleaner.clean(text)
         self.assertEqual(cleaned.lower(), "we should ship today.")
+
+    def test_dedupes_adjacent_long_sentences(self) -> None:
+        text = (
+            "The code is a little bit different from the code that we have used in the previous version. "
+            "The code is a little bit different from the code that we have used in the previous version."
+        )
+        cleaned = TextCleaner.clean(text)
+        self.assertEqual(
+            cleaned.lower().count(
+                "the code is a little bit different from the code that we have used in the previous version"
+            ),
+            1,
+        )
 
     def test_single_no_statement_does_not_replace_previous_sentence(self) -> None:
         text = "we should enable this for all users. no we don't want that yet."

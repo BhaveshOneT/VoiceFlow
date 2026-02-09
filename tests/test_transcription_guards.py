@@ -285,6 +285,13 @@ class TextCleanerBehaviorTests(unittest.TestCase):
         self.assertIn("@text_refiner.py", cleaned)
         self.assertIn("@docker-compose.yml", cleaned)
 
+    def test_merges_prefixed_tagged_filename_after_rename_verb(self) -> None:
+        cleaned = TextCleaner.clean(
+            "then rename release @notes.md to @release-notes.md"
+        ).lower()
+        self.assertNotIn("release @notes.md", cleaned)
+        self.assertIn("rename @release-notes.md to @release-notes.md", cleaned)
+
     def test_does_not_tag_framework_terms_as_files(self) -> None:
         cleaned = TextCleaner.clean("technical terms like next.js and plate.js")
         self.assertNotIn("@next.js", cleaned.lower())
@@ -338,6 +345,15 @@ class TextCleanerBehaviorTests(unittest.TestCase):
             1,
         )
 
+    def test_dedupes_repeated_tail_sentence_after_longer_clause(self) -> None:
+        text = (
+            "The bug appears during long dictation The code is used in the following way. "
+            "The code is used in the following way."
+        )
+        cleaned = TextCleaner.clean(text).lower()
+        self.assertEqual(cleaned.count("the code is used in the following way"), 1)
+        self.assertIn("long dictation. the code is used", cleaned)
+
     def test_single_no_statement_does_not_replace_previous_sentence(self) -> None:
         text = "we should enable this for all users. no we don't want that yet."
         cleaned = TextCleaner.clean(text).lower()
@@ -380,6 +396,15 @@ class TextCleanerBehaviorTests(unittest.TestCase):
     def test_trailing_conjunction_is_removed_before_period(self) -> None:
         cleaned = TextCleaner.clean("now we should deploy but")
         self.assertEqual(cleaned, "Now we should deploy")
+
+    def test_embedded_should_question_is_made_explicit(self) -> None:
+        cleaned = TextCleaner.clean(
+            "if i ask should we ship today or wait for one more smoke test keep it as a question and do not answer it"
+        )
+        self.assertIn(
+            "if i ask, should we ship today or wait for one more smoke test?",
+            cleaned.lower(),
+        )
 
 
 if __name__ == "__main__":

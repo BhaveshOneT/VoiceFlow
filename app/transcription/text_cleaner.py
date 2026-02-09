@@ -212,6 +212,14 @@ _TRAILING_CONJUNCTION_RE = re.compile(
     r"\b(?:and|or|but|so|because|then)\b\s*$",
     re.IGNORECASE,
 )
+_MISSING_SENTENCE_BREAK_RE = re.compile(
+    r"(?<=[a-z0-9])\s+(?=(?:The|Then|And|But)\s+[A-Z]?[a-z])"
+)
+_VERB_PREFIX_TAG_FILE_RE = re.compile(
+    rf"\b(?P<verb>rename|update|modify|edit|open|create|delete|move|copy)\s+"
+    rf"(?P<prefix>[A-Za-z0-9_-]{{2,}})\s+@(?P<name>[A-Za-z0-9_-]+\.(?:{_FILE_EXT_ALT}))\b",
+    re.IGNORECASE,
+)
 _FRAGMENTED_TAG_RE = re.compile(
     rf'@(?P<left>[A-Za-z0-9_-]+)(?P<sep>[-_])@(?P<right>[A-Za-z0-9_-]+\.(?:{_FILE_EXT_ALT}))\b',
     re.IGNORECASE,
@@ -238,6 +246,10 @@ _TAGGED_JS_LIST_RE = re.compile(
     r'(?P<body>@[A-Za-z0-9_-]+\.(?:js|jsx|ts|tsx)\b'
     r'(?:\s*,\s*@[A-Za-z0-9_-]+\.(?:js|jsx|ts|tsx)\b)*'
     r'(?:\s+and\s+@[A-Za-z0-9_-]+\.(?:js|jsx|ts|tsx)\b)?)',
+    re.IGNORECASE,
+)
+_EMBEDDED_SHOULD_QUESTION_RE = re.compile(
+    r"\bif\s+i\s+ask\s+should\s+(?P<body>.+?)\s+(?=keep it as a question\b)",
     re.IGNORECASE,
 )
 _STRONG_REPLACE_CUES = {
@@ -468,6 +480,7 @@ class TextCleaner:
         text = _LONE_EXTENSION_TAG_RE.sub(r"\g<ext>", text)
         text = _FRAGMENTED_TAG_RE.sub(cls._merge_fragmented_tags, text)
         text = _SPOKEN_FRAGMENTED_TAG_RE.sub(cls._merge_spoken_fragmented_tag, text)
+        text = _VERB_PREFIX_TAG_FILE_RE.sub(cls._merge_prefixed_tagged_file, text)
         text = _TAGGED_JS_LIST_RE.sub(cls._untag_js_list, text)
         return text
 
@@ -494,7 +507,7 @@ class TextCleaner:
             word_count = len(norm.split())
             if norm == prev_norm and word_count >= 3:
                 continue
-            if prev_norm and word_count >= 10 and prev_norm.endswith(norm):
+            if prev_norm and word_count >= 6 and prev_norm.endswith(norm):
                 continue
             out.append(chunk)
             prev_norm = norm
@@ -574,6 +587,19 @@ class TextCleaner:
         return f"@{match.group('left')}{sep}{match.group('right')}"
 
     @staticmethod
+    def _merge_prefixed_tagged_file(match: re.Match[str]) -> str:
+        verb = match.group("verb")
+        prefix = match.group("prefix")
+        name = match.group("name")
+        lowered_name = name.lower()
+        lowered_prefix = prefix.lower()
+        if lowered_name.startswith(f"{lowered_prefix}-") or lowered_name.startswith(
+            f"{lowered_prefix}_"
+        ):
+            return match.group(0)
+        return f"{verb} @{prefix}-{name}"
+
+    @staticmethod
     def _untag_js_list(match: re.Match[str]) -> str:
         body = match.group("body").replace("@", "")
         return f"{match.group('prefix')}{body}"
@@ -631,6 +657,11 @@ class TextCleaner:
         text = text.strip()
         text = text.rstrip(" ,;:")
         text = _TRAILING_CONJUNCTION_RE.sub("", text).rstrip(" ,;:")
+        text = _MISSING_SENTENCE_BREAK_RE.sub(". ", text)
+        text = _EMBEDDED_SHOULD_QUESTION_RE.sub(
+            lambda m: f"if I ask, should {m.group('body').strip(' ,.;:')}? ",
+            text,
+        )
         text = _I_CONTRACTION_RE.sub("I", text)
         text = _STANDALONE_I_RE.sub("I", text)
         text = _LEADING_LOWER_RE.sub(lambda m: f"{m.group(1)}{m.group(2).upper()}", text)

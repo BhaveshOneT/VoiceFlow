@@ -35,10 +35,19 @@ _LANGUAGE_ALIASES = {
     "english_german": "auto",
     "en_de": "auto",
 }
+_TRANSCRIPTION_MODE_ALIASES = {
+    "normal": "normal",
+    "general": "normal",
+    "default": "normal",
+    "programmer": "programmer",
+    "coding": "programmer",
+    "developer": "programmer",
+}
 
 
 @dataclass
 class AppConfig:
+    transcription_mode: str = "programmer"
     recording_mode: str = "push_to_talk"
     hotkey: str = "right_cmd"
     silence_duration_ms: int = 700
@@ -64,6 +73,10 @@ class AppConfig:
         self.language = _LANGUAGE_ALIASES.get(
             str(self.language).strip().lower(), DEFAULT_LANGUAGE
         )
+        self.transcription_mode = _TRANSCRIPTION_MODE_ALIASES.get(
+            str(self.transcription_mode).strip().lower(),
+            "programmer",
+        )
         if not self.llm_model:
             self.llm_model = DEFAULT_LLM_MODEL
         self.llm_model = _LLM_MODEL_ALIASES.get(self.llm_model, self.llm_model)
@@ -83,6 +96,8 @@ class AppConfig:
                     or filtered.get("max_accuracy_whisper_model")
                     != config.max_accuracy_whisper_model
                     or filtered.get("llm_model") != config.llm_model
+                    or filtered.get("transcription_mode")
+                    != config.transcription_mode
                 ):
                     config.save()
                 return config

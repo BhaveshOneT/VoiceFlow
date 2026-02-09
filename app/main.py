@@ -94,6 +94,17 @@ class VoiceFlowApp(rumps.App):
             "Open Microphone Settings", callback=self._open_microphone_settings
         )
 
+        self._normal_mode_item = rumps.MenuItem(
+            "Normal Mode", callback=self._set_transcription_mode_normal
+        )
+        self._programmer_mode_item = rumps.MenuItem(
+            "Programmer Mode", callback=self._set_transcription_mode_programmer
+        )
+        transcription_mode_menu = rumps.MenuItem("Transcription Mode")
+        transcription_mode_menu.update(
+            [self._normal_mode_item, self._programmer_mode_item]
+        )
+
         self._fast_item = rumps.MenuItem("Fast Mode", callback=self._set_fast_mode)
         self._standard_item = rumps.MenuItem("Standard Mode", callback=self._set_standard_mode)
         self._max_item = rumps.MenuItem("Max Accuracy Mode", callback=self._set_max_accuracy_mode)
@@ -121,6 +132,7 @@ class VoiceFlowApp(rumps.App):
                 self._accessibility_item,
                 self._microphone_item,
                 None,  # separator
+                transcription_mode_menu,
                 accuracy_menu,
                 language_menu,
                 None,  # separator
@@ -129,6 +141,7 @@ class VoiceFlowApp(rumps.App):
         )
 
         # Mark the current accuracy mode
+        self._sync_transcription_mode_checkmarks()
         self._sync_mode_checkmarks()
         self._sync_language_checkmarks()
 
@@ -377,6 +390,41 @@ class VoiceFlowApp(rumps.App):
         self._fast_item.state = mode == "fast"
         self._standard_item.state = mode == "standard"
         self._max_item.state = mode == "max_accuracy"
+
+    def _set_transcription_mode_normal(self, sender: rumps.MenuItem) -> None:
+        self._switch_transcription_mode("normal")
+
+    def _set_transcription_mode_programmer(self, sender: rumps.MenuItem) -> None:
+        self._switch_transcription_mode("programmer")
+
+    def _switch_transcription_mode(self, mode: str) -> None:
+        old_mode = self.config.transcription_mode
+        if old_mode == mode:
+            return
+        log.info("Switching transcription mode to %s", mode)
+        try:
+            self.pipeline.set_transcription_mode(mode)
+        except Exception as exc:
+            log.exception("Failed to switch transcription mode to %s", mode)
+            self.config.transcription_mode = old_mode
+            self.config.save()
+            self._sync_transcription_mode_checkmarks()
+            self._show_error(
+                title="Mode switch failed",
+                message=f"{exc}",
+            )
+            return
+
+        self.config.transcription_mode = mode
+        self.config.save()
+        self._sync_transcription_mode_checkmarks()
+        label = "Programmer" if mode == "programmer" else "Normal"
+        self._set_status(f"{label} transcription mode")
+
+    def _sync_transcription_mode_checkmarks(self) -> None:
+        mode = self.config.transcription_mode
+        self._normal_mode_item.state = mode == "normal"
+        self._programmer_mode_item.state = mode == "programmer"
 
     def _set_language_auto(self, sender: rumps.MenuItem) -> None:
         self._switch_language("auto")

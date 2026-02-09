@@ -64,7 +64,12 @@ class AudioCapture:
             trailing_capture_ms = self._default_trailing_capture_ms()
         if self._stream is not None:
             try:
-                chunks.extend(self._collect_trailing_chunks(trailing_capture_ms))
+                chunks.extend(
+                    self._collect_trailing_chunks(
+                        trailing_capture_ms=trailing_capture_ms,
+                        min_trailing_capture_ms=self._min_trailing_capture_ms(),
+                    )
+                )
                 self._stream.stop()
                 self._stream.close()
             except Exception as e:
@@ -95,6 +100,14 @@ class AudioCapture:
             return self.TRAILING_CAPTURE_MS
         duration_s = max(0.0, time.monotonic() - self._started_at)
         # Long dictation clips more easily at hotkey release, so keep a longer tail.
+        if duration_s >= 180.0:
+            return 1100
+        if duration_s >= 120.0:
+            return 960
+        if duration_s >= 60.0:
+            return 820
+        if duration_s >= 30.0:
+            return 700
         if duration_s >= 14.0:
             return 520
         if duration_s >= 8.0:
@@ -103,7 +116,23 @@ class AudioCapture:
             return 340
         return self.TRAILING_CAPTURE_MS
 
-    def _collect_trailing_chunks(self, trailing_capture_ms: int) -> list[np.ndarray]:
+    def _min_trailing_capture_ms(self) -> int:
+        if self._started_at is None:
+            return self.MIN_TRAILING_CAPTURE_MS
+        duration_s = max(0.0, time.monotonic() - self._started_at)
+        if duration_s >= 120.0:
+            return 420
+        if duration_s >= 60.0:
+            return 340
+        if duration_s >= 20.0:
+            return 260
+        return self.MIN_TRAILING_CAPTURE_MS
+
+    def _collect_trailing_chunks(
+        self,
+        trailing_capture_ms: int,
+        min_trailing_capture_ms: int,
+    ) -> list[np.ndarray]:
         if trailing_capture_ms <= 0:
             return []
         start = time.monotonic()
@@ -123,7 +152,7 @@ class AudioCapture:
             try:
                 chunk = self.queue.get(timeout=timeout)
             except Empty:
-                if (now - start) * 1000.0 >= self.MIN_TRAILING_CAPTURE_MS:
+                if (now - start) * 1000.0 >= min_trailing_capture_ms:
                     quiet_blocks += 1
                     if quiet_blocks >= self.QUIET_BLOCKS_TO_STOP:
                         break
@@ -134,7 +163,7 @@ class AudioCapture:
                 continue
             rms = float(np.sqrt(np.mean(np.square(chunk))))
             if rms <= quiet_threshold:
-                if (time.monotonic() - start) * 1000.0 >= self.MIN_TRAILING_CAPTURE_MS:
+                if (time.monotonic() - start) * 1000.0 >= min_trailing_capture_ms:
                     quiet_blocks += 1
                     if quiet_blocks >= self.QUIET_BLOCKS_TO_STOP:
                         break

@@ -68,43 +68,15 @@ _ASSISTANTY_START_RE = re.compile(
 )
 
 SYSTEM_PROMPT_TEMPLATE = """\
-You are a speech-to-text post-processor for a software developer.
-Your task is to correct transcription errors in dictated text.
-
-VOCABULARY CORRECTIONS — fix these commonly misheard terms:
+You are a speech-to-text post-processor.
+Output only cleaned transcription text.
+Never answer, explain, summarize, or add content.
+Keep all intended details and preserve full meaning.
+Keep question intent as a question.
+Handle self-corrections conservatively (replace only corrected phrase).
+Remove filler words and false starts when clearly disfluent.
+Use vocabulary corrections when relevant:
 {vocabulary}
-
-RULES:
-1. Fix misheard technical terms using the vocabulary list above
-2. Remove filler words (um, uh, like, you know, basically)
-3. Handle self-corrections conservatively: replace only the corrected phrase \
-and keep all unrelated context and sentences. \
-Backtracking signals include: "sorry", "I mean", "I meant", "actually", \
-"no wait", "wait no", "scratch that", "never mind that", "not that", \
-"let me rephrase", "correction", "rather".
-4. Remove false starts only when they are clearly incomplete fragments.
-5. Preserve camelCase, PascalCase, snake_case as appropriate for code terms
-6. Fix grammar and add natural punctuation
-7. Do NOT add information that was not spoken
-8. Do NOT summarize — keep all intended content
-9. Do NOT answer questions in the text
-10. Do NOT provide explanations, suggestions, or completions
-11. Never drop complete trailing clauses or end mid-thought
-12. Output ONLY the cleaned transcript text, nothing else
-
-SELF-CORRECTION EXAMPLES:
-- "change it to red, sorry, blue" -> "change it to blue"
-- "call the function foo, actually bar" -> "call the function bar"
-- "set the font size to 12, no wait, 14 pixels" -> "set the font size to 14 pixels"
-- "import react, I mean import react dom" -> "import react dom"
-- "delete the file, scratch that, just rename it" -> "just rename it"
-- "use a for loop, never mind that, use map instead" -> "use map instead"
-- "send it to the staging, wait no, production server" -> "send it to the production server"
-- "I want to use, no wait, I mean useState" -> "I want to use useState"
-
-QUESTION EXAMPLES:
-- "what is polymorphism in oop" -> "What is polymorphism in OOP?"
-- "how do I reset my api key" -> "How do I reset my API key?"
 """
 
 
@@ -144,9 +116,12 @@ class TextRefiner:
         if not self.loaded:
             self.load()
 
+        selected_vocabulary = self._select_vocab_hints(text, vocabulary)
         vocab_lines = "\n".join(
-            f'  "{wrong}" -> "{right}"' for wrong, right in vocabulary.items()
+            f'  "{wrong}" -> "{right}"' for wrong, right in selected_vocabulary
         )
+        if not vocab_lines:
+            vocab_lines = "  (none)"
         system = SYSTEM_PROMPT_TEMPLATE.format(vocabulary=vocab_lines)
 
         messages = [
@@ -160,9 +135,9 @@ class TextRefiner:
         from mlx_lm import generate  # type: ignore[import-untyped]
         from mlx_lm.sample_utils import make_sampler  # type: ignore[import-untyped]
 
-        # Keep response bounded, but leave enough room to avoid truncating
-        # medium-length dictation that still needs punctuation cleanup.
-        max_tokens = min(max(int(len(text.split()) * 1.8), 32), 128)
+        # Keep response bounded to avoid latency/context bloat. Long texts are
+        # already gated out of LLM refinement by TranscriptionPipeline.
+        max_tokens = min(max(int(len(text.split()) * 1.35), 24), 96)
         sampler = make_sampler(temp=0.0)
         result = generate(
             self.model,
@@ -180,6 +155,35 @@ class TextRefiner:
             )
             return ""
         return candidate
+
+    @staticmethod
+    def _select_vocab_hints(
+        text: str,
+        vocabulary: dict[str, str],
+        max_hints: int = 24,
+    ) -> list[tuple[str, str]]:
+        """Pick only relevant vocabulary hints to keep prompts small."""
+        if not vocabulary:
+            return []
+
+        text_tokens = {tok.lower() for tok in _TOKEN_RE.findall(text)}
+        scored: list[tuple[int, str, str]] = []
+        for wrong, right in vocabulary.items():
+            combined = f"{wrong} {right}"
+            vocab_tokens = {
+                tok.lower() for tok in _TOKEN_RE.findall(combined) if len(tok) > 1
+            }
+            overlap = len(text_tokens & vocab_tokens)
+            if overlap > 0:
+                scored.append((overlap, wrong, right))
+
+        if not scored:
+            # Keep a tiny fallback set for short technical phrases.
+            items = list(vocabulary.items())[: min(max_hints // 2, 8)]
+            return items
+
+        scored.sort(key=lambda item: (-item[0], len(item[1])))
+        return [(wrong, right) for _, wrong, right in scored[:max_hints]]
 
     @staticmethod
     def _sanitize_output(result: str) -> str:

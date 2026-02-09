@@ -7,6 +7,9 @@ Hold `Right Cmd`, speak, release, and VoiceFlow inserts cleaned text into the fo
 
 - Real-time speech-to-text with local Whisper (`mlx-whisper`)
 - Smart post-processing with local LLM (`Qwen2.5-3B-4bit`)
+- Two transcription modes:
+  - `Programmer Mode` (code-aware terms, file tagging)
+  - `Normal Mode` (clean dictation without code-specific tagging)
 - Built-in cleanup for filler words and self-corrections (`"no no", "sorry", "I mean"`)
 - File mention tagging, for example:
   - `"update function.py file"` -> `@ function.py`
@@ -60,6 +63,7 @@ If env vars are not set, build still works and skips signing/notarization.
 
 - Hotkey becomes available as soon as the speech model is ready.
 - LLM refiner loads in background and does not block recording startup.
+- Long recordings are transcribed in overlap-safe chunks with tail-pass recovery.
 - First launch may download model files to `~/.cache/huggingface/`.
 - VoiceFlow logs stage timings for post-record latency:
   - `capture_stop_ms`

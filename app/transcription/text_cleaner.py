@@ -175,7 +175,12 @@ _WEAK_REPLACE_CUES = {"sorry"}
 
 class TextCleaner:
     @classmethod
-    def clean(cls, text: str, dictionary: dict[str, str] | None = None) -> str:
+    def clean(
+        cls,
+        text: str,
+        dictionary: dict[str, str] | None = None,
+        programmer_mode: bool = True,
+    ) -> str:
         for pattern in _FILLER_REMOVE:
             text = pattern.sub('', text)
         text = _FILLER_REPLACE_SPACE.sub(' ', text)
@@ -188,7 +193,8 @@ class TextCleaner:
 
         text = cls._apply_self_corrections(text)
         text = cls._collapse_repeated_clauses(text)
-        text = cls._tag_file_mentions(text)
+        if programmer_mode:
+            text = cls._tag_file_mentions(text)
         text = re.sub(r'\s{2,}', ' ', text)
         text = re.sub(r'\s+([.,!?;:])', r'\1', text)
         text = re.sub(r'^[,\s]+', '', text)
@@ -199,6 +205,7 @@ class TextCleaner:
         cls,
         text: str,
         dictionary: dict[str, str] | None = None,
+        programmer_mode: bool = True,
     ) -> str:
         """Conservative cleanup that avoids sentence replacement heuristics."""
         for pattern in _FILLER_REMOVE:
@@ -210,7 +217,8 @@ class TextCleaner:
             for wrong, right in sorted(dictionary.items(), key=lambda kv: -len(kv[0])):
                 text = re.sub(re.escape(wrong), right, text, flags=re.IGNORECASE)
         text = cls._collapse_repeated_clauses(text)
-        text = cls._tag_file_mentions(text)
+        if programmer_mode:
+            text = cls._tag_file_mentions(text)
         text = re.sub(r'\s{2,}', ' ', text)
         text = re.sub(r'\s+([.,!?;:])', r'\1', text)
         text = re.sub(r'^[,\s]+', '', text)

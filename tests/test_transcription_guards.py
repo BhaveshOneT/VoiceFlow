@@ -42,6 +42,23 @@ class TextRefinerGuardTests(unittest.TestCase):
             "Please update the parser module.",
         )
 
+    def test_vocab_hints_are_trimmed_to_relevant_entries(self) -> None:
+        vocabulary = {
+            "plate js": "Plate.js",
+            "react dom": "ReactDOM",
+            "api key": "API key",
+            "unrelated term": "unrelated term",
+        }
+        hints = TextRefiner._select_vocab_hints(
+            "please update plate js and api key handling",
+            vocabulary,
+            max_hints=3,
+        )
+        hinted_keys = {wrong for wrong, _ in hints}
+        self.assertIn("plate js", hinted_keys)
+        self.assertIn("api key", hinted_keys)
+        self.assertNotIn("unrelated term", hinted_keys)
+
 
 class PipelineRefinementGateTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -107,7 +124,12 @@ class PipelineRefinementGateTests(unittest.TestCase):
             "that still need fixes also"
         )
         cleaned = "we still need to check if it actually worked also"
-        out = self.pipeline._preserve_completeness(raw, cleaned, {})
+        out = self.pipeline._preserve_completeness(
+            raw,
+            cleaned,
+            {},
+            programmer_mode=True,
+        )
         self.assertGreater(len(out.split()), len(cleaned.split()))
         self.assertIn("setting things up", out.lower())
 
@@ -125,6 +147,38 @@ class PipelineRefinementGateTests(unittest.TestCase):
         trimmed, changed = self.pipeline._trim_silence_for_decode(audio)
         self.assertFalse(changed)
         self.assertEqual(trimmed.size, audio.size)
+
+    def test_long_audio_is_split_into_overlapping_chunks(self) -> None:
+        audio = np.zeros(16000 * 190, dtype=np.float32)  # 3m10s
+        chunks = self.pipeline._split_for_long_transcription(audio)
+        self.assertGreater(len(chunks), 1)
+        self.assertEqual(chunks[0].size, int(42.0 * 16000))
+        self.assertGreaterEqual(chunks[-1].size, int(12.0 * 16000))
+
+    def test_merge_transcript_parts_removes_overlap(self) -> None:
+        merged = self.pipeline._merge_transcript_parts(
+            [
+                "we should update the parser module and run tests before merge",
+                "and run tests before merge then deploy to staging",
+            ]
+        )
+        self.assertIn("deploy to staging", merged.lower())
+        self.assertEqual(
+            merged.lower().count("and run tests before merge"),
+            1,
+        )
+
+    def test_tail_coverage_detection(self) -> None:
+        full = (
+            "we shipped to staging and validated smoke tests then fixed two bugs "
+            "before final rollout this morning"
+        )
+        tail = "fixed two bugs before final rollout this morning"
+        self.assertTrue(self.pipeline._is_tail_covered(full, tail))
+
+    def test_transcription_mode_switches_to_normal(self) -> None:
+        self.pipeline.set_transcription_mode("normal")
+        self.assertFalse(self.pipeline._programmer_mode_enabled())
 
 
 class TextCleanerBehaviorTests(unittest.TestCase):
@@ -144,6 +198,14 @@ class TextCleanerBehaviorTests(unittest.TestCase):
         spoken = TextCleaner.clean("please update function dot py file")
         self.assertIn("@ function.py", explicit)
         self.assertIn("@ function.py", spoken)
+
+    def test_normal_mode_skips_file_tagging(self) -> None:
+        cleaned = TextCleaner.clean(
+            "please update function.py file",
+            programmer_mode=False,
+        )
+        self.assertNotIn("@ function.py", cleaned.lower())
+        self.assertIn("function.py", cleaned.lower())
 
     def test_bare_generic_file_reference_is_not_tagged(self) -> None:
         cleaned = TextCleaner.clean("please open the file")

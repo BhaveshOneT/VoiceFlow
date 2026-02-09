@@ -22,6 +22,14 @@ class ConfigLlmModelTests(unittest.TestCase):
         cfg = AppConfig(language="english_german")
         self.assertEqual(cfg.language, "auto")
 
+    def test_default_transcription_mode_is_programmer(self) -> None:
+        cfg = AppConfig()
+        self.assertEqual(cfg.transcription_mode, "programmer")
+
+    def test_transcription_mode_alias_general_maps_to_normal(self) -> None:
+        cfg = AppConfig(transcription_mode="general")
+        self.assertEqual(cfg.transcription_mode, "normal")
+
 
 if __name__ == "__main__":
     unittest.main()

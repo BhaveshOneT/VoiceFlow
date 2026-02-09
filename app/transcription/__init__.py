@@ -51,6 +51,16 @@ _TRIM_FRAME_SAMPLES = 320  # 20 ms at 16 kHz
 _TRIM_PADDING_SAMPLES = 3520  # 220 ms safety pad around speech
 _TRIM_MIN_RMS = 0.0025
 _TRIM_MAX_RMS = 0.018
+_LONG_AUDIO_CHUNK_THRESHOLD_S = 75.0
+_LONG_AUDIO_CHUNK_S = 42.0
+_LONG_AUDIO_CHUNK_OVERLAP_S = 1.2
+_LONG_AUDIO_MIN_FINAL_CHUNK_S = 12.0
+_LONG_AUDIO_TAIL_PASS_THRESHOLD_S = 95.0
+_LONG_AUDIO_TAIL_WINDOW_S = 24.0
+_WORD_TOKEN_RE = re.compile(r"[A-Za-z0-9_']+")
+_TOKEN_SPLIT_RE = re.compile(r"\S+")
+_MIN_OVERLAP_WORDS = 4
+_MAX_OVERLAP_WORDS = 20
 
 
 def _log_transcript(stage: str, text: str) -> None:
@@ -78,6 +88,7 @@ class TranscriptionPipeline:
     def __init__(self, config: AppConfig, dictionary: Dictionary) -> None:
         self.config = config
         self.dictionary = dictionary
+        self.transcription_mode = config.transcription_mode
 
         # Select whisper model based on cleanup mode
         whisper_model = config.whisper_model
@@ -102,11 +113,12 @@ class TranscriptionPipeline:
 
         audio, trimmed = self._trim_silence_for_decode(audio)
         decode_samples = int(audio.size)
+        programmer_mode = self._programmer_mode_enabled()
 
         # 1. Whisper transcription
         stt_started = time.perf_counter()
-        tech_context = self.dictionary.get_whisper_context()
-        raw = self._transcribe_with_fallback(audio, tech_context=tech_context)
+        tech_context = self.dictionary.get_whisper_context() if programmer_mode else ""
+        raw = self._transcribe_adaptive(audio, tech_context=tech_context)
         stt_ms = (time.perf_counter() - stt_started) * 1000.0
         _log_transcript("Raw transcription", raw)
 
@@ -125,8 +137,12 @@ class TranscriptionPipeline:
 
         # 2. Regex cleanup + dictionary replacement (always, <5ms)
         clean_started = time.perf_counter()
-        dictionary_terms = self.dictionary.get_all_terms()
-        cleaned = self.cleaner.clean(raw, dictionary_terms)
+        dictionary_terms = self.dictionary.get_all_terms() if programmer_mode else {}
+        cleaned = self.cleaner.clean(
+            raw,
+            dictionary_terms,
+            programmer_mode=programmer_mode,
+        )
         clean_ms = (time.perf_counter() - clean_started) * 1000.0
         _log_transcript("After regex cleanup", cleaned)
         needs_refinement = self._should_refine(cleaned, raw_text=raw)
@@ -143,7 +159,8 @@ class TranscriptionPipeline:
             try:
                 pre_refine = cleaned
                 refined = self.refiner.refine(
-                    cleaned, dictionary_terms
+                    cleaned,
+                    dictionary_terms,
                 )
                 if refined.strip():
                     if self._is_suspiciously_short_refinement(pre_refine, refined):
@@ -176,11 +193,20 @@ class TranscriptionPipeline:
         # 4. Final deterministic cleanup to enforce tag formatting and
         # disfluency rules even after optional LLM rewriting.
         finalize_started = time.perf_counter()
-        finalized = self.cleaner.clean(cleaned, dictionary_terms)
+        finalized = self.cleaner.clean(
+            cleaned,
+            dictionary_terms,
+            programmer_mode=programmer_mode,
+        )
         if finalized.strip():
             cleaned = finalized
 
-        cleaned = self._preserve_completeness(raw, cleaned, dictionary_terms)
+        cleaned = self._preserve_completeness(
+            raw,
+            cleaned,
+            dictionary_terms,
+            programmer_mode=programmer_mode,
+        )
         finalize_ms = (time.perf_counter() - finalize_started) * 1000.0
         total_ms = (time.perf_counter() - total_started) * 1000.0
         log.info(
@@ -198,6 +224,157 @@ class TranscriptionPipeline:
         )
         _log_transcript("Final transcription output", cleaned)
         return cleaned
+
+    def _transcribe_adaptive(self, audio: np.ndarray, tech_context: str) -> str:
+        """Transcribe short audio directly; chunk long recordings for reliability."""
+        duration_s = audio.size / 16000.0
+        if duration_s < _LONG_AUDIO_CHUNK_THRESHOLD_S:
+            return self._transcribe_with_fallback(audio, tech_context=tech_context)
+
+        chunks = self._split_for_long_transcription(audio)
+        log.info(
+            "Long recording detected (%.1fs); transcribing in %d chunks",
+            duration_s,
+            len(chunks),
+        )
+
+        parts: list[str] = []
+        for idx, chunk in enumerate(chunks, start=1):
+            part = self._transcribe_with_fallback(chunk, tech_context=tech_context).strip()
+            if not part:
+                continue
+            parts.append(part)
+            log.info(
+                "Long recording chunk %d/%d decoded (chunk_s=%.1f, words=%d)",
+                idx,
+                len(chunks),
+                chunk.size / 16000.0,
+                len(part.split()),
+            )
+
+        if not parts:
+            return ""
+
+        merged = self._merge_transcript_parts(parts)
+        if duration_s >= _LONG_AUDIO_TAIL_PASS_THRESHOLD_S:
+            merged = self._append_tail_pass_if_needed(
+                merged,
+                audio,
+                tech_context=tech_context,
+            )
+        return merged
+
+    @staticmethod
+    def _split_for_long_transcription(audio: np.ndarray) -> list[np.ndarray]:
+        """Split long audio into overlapping chunks to avoid tail loss."""
+        sample_rate = 16000
+        chunk_samples = int(_LONG_AUDIO_CHUNK_S * sample_rate)
+        overlap_samples = int(_LONG_AUDIO_CHUNK_OVERLAP_S * sample_rate)
+        min_final_chunk_samples = int(_LONG_AUDIO_MIN_FINAL_CHUNK_S * sample_rate)
+        stride = max(chunk_samples - overlap_samples, sample_rate)
+        total = int(audio.size)
+
+        if total <= chunk_samples:
+            return [audio]
+
+        chunks: list[np.ndarray] = []
+        start = 0
+        while start < total:
+            end = min(start + chunk_samples, total)
+            remaining = total - end
+            if 0 < remaining < min_final_chunk_samples:
+                end = total
+            chunks.append(audio[start:end])
+            if end >= total:
+                break
+            start += stride
+        return chunks
+
+    @classmethod
+    def _merge_transcript_parts(cls, parts: list[str]) -> str:
+        """Merge chunk transcripts while dropping overlap duplication."""
+        cleaned_parts = [part.strip() for part in parts if part and part.strip()]
+        if not cleaned_parts:
+            return ""
+        if len(cleaned_parts) == 1:
+            return cleaned_parts[0]
+
+        merged = cleaned_parts[0]
+        merged_tokens = cls._word_tokens(merged)
+        for part in cleaned_parts[1:]:
+            part_tokens = cls._word_tokens(part)
+            overlap = cls._find_token_overlap(merged_tokens, part_tokens)
+            trimmed_part = cls._drop_leading_tokens(part, overlap)
+            if not trimmed_part:
+                continue
+            merged = f"{merged} {trimmed_part}".strip()
+            merged_tokens = cls._word_tokens(merged)
+        return merged
+
+    def _append_tail_pass_if_needed(
+        self,
+        transcript: str,
+        audio: np.ndarray,
+        tech_context: str,
+    ) -> str:
+        """Decode the tail of long recordings to prevent dropped final details."""
+        if audio.size <= int(_LONG_AUDIO_TAIL_WINDOW_S * 16000):
+            return transcript
+
+        tail_samples = int(_LONG_AUDIO_TAIL_WINDOW_S * 16000)
+        tail_audio = audio[-tail_samples:]
+        tail_text = self._transcribe_with_fallback(
+            tail_audio,
+            tech_context=tech_context,
+        ).strip()
+        if not tail_text:
+            return transcript
+        if self._is_tail_covered(transcript, tail_text):
+            return transcript
+
+        merged = self._merge_transcript_parts([transcript, tail_text])
+        log.info(
+            "Tail-pass appended extra detail (base_words=%d, merged_words=%d)",
+            len(transcript.split()),
+            len(merged.split()),
+        )
+        return merged
+
+    @staticmethod
+    def _word_tokens(text: str) -> list[str]:
+        return [match.group(0).lower() for match in _WORD_TOKEN_RE.finditer(text)]
+
+    @staticmethod
+    def _drop_leading_tokens(text: str, token_count: int) -> str:
+        if token_count <= 0:
+            return text.strip()
+        matches = list(_TOKEN_SPLIT_RE.finditer(text))
+        if token_count >= len(matches):
+            return ""
+        return text[matches[token_count - 1].end():].lstrip()
+
+    @classmethod
+    def _find_token_overlap(cls, left: list[str], right: list[str]) -> int:
+        if not left or not right:
+            return 0
+        upper = min(_MAX_OVERLAP_WORDS, len(left), len(right))
+        for size in range(upper, _MIN_OVERLAP_WORDS - 1, -1):
+            if left[-size:] == right[:size]:
+                return size
+        return 0
+
+    @classmethod
+    def _is_tail_covered(cls, full_text: str, tail_text: str) -> bool:
+        full_tokens = cls._word_tokens(full_text)
+        tail_tokens = cls._word_tokens(tail_text)
+        if len(full_tokens) < 6 or len(tail_tokens) < 6:
+            return False
+        probe_size = min(12, len(tail_tokens))
+        probe = tail_tokens[-probe_size:]
+        for start in range(len(full_tokens) - probe_size + 1):
+            if full_tokens[start:start + probe_size] == probe:
+                return True
+        return False
 
     @staticmethod
     def _trim_silence_for_decode(audio: np.ndarray) -> tuple[np.ndarray, bool]:
@@ -303,6 +480,7 @@ class TranscriptionPipeline:
         raw: str,
         cleaned: str,
         dictionary_terms: dict[str, str],
+        programmer_mode: bool,
     ) -> str:
         """Fallback to conservative cleanup if aggressive shortening is detected."""
         raw_words = len(raw.split())
@@ -316,7 +494,11 @@ class TranscriptionPipeline:
         if not _ORPHAN_END_RE.search(cleaned.strip()):
             return cleaned
 
-        conservative = self.cleaner.clean_conservative(raw, dictionary_terms)
+        conservative = self.cleaner.clean_conservative(
+            raw,
+            dictionary_terms,
+            programmer_mode=programmer_mode,
+        )
         conservative_words = len(conservative.split())
         if conservative_words > cleaned_words:
             log.warning(
@@ -450,6 +632,15 @@ class TranscriptionPipeline:
         elif mode != "fast" and not self.refiner:
             self.refiner = TextRefiner(model_name=self.config.llm_model)
             self.refiner.load()
+
+    def set_transcription_mode(self, mode: str) -> None:
+        """Switch between normal and programmer transcription behavior."""
+        normalized = "programmer" if str(mode).lower() == "programmer" else "normal"
+        self.transcription_mode = normalized
+        self.config.transcription_mode = normalized
+
+    def _programmer_mode_enabled(self) -> bool:
+        return self.transcription_mode == "programmer"
 
     def set_language(self, language: str) -> None:
         """Switch transcription language at runtime.

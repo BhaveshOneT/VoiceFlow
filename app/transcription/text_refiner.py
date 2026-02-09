@@ -137,7 +137,7 @@ class TextRefiner:
 
         # Keep response bounded to avoid latency/context bloat. Long texts are
         # already gated out of LLM refinement by TranscriptionPipeline.
-        max_tokens = min(max(int(len(text.split()) * 1.35), 24), 96)
+        max_tokens = min(max(int(len(text.split()) * 1.2), 20), 80)
         sampler = make_sampler(temp=0.0)
         result = generate(
             self.model,

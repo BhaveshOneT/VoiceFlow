@@ -257,6 +257,20 @@ class TextCleanerBehaviorTests(unittest.TestCase):
         self.assertIn("@function.py", explicit)
         self.assertIn("@function.py", spoken)
 
+    def test_tags_spoken_dmg_filename(self) -> None:
+        cleaned = TextCleaner.clean("please update voiceflow dot dmg file")
+        self.assertIn("@voiceflow.dmg", cleaned.lower())
+
+    def test_does_not_tag_bare_extension_as_file(self) -> None:
+        cleaned = TextCleaner.clean("please update dmg file")
+        self.assertNotIn("@dmg", cleaned.lower())
+        self.assertIn("dmg file", cleaned.lower())
+
+    def test_sanitizes_lone_extension_tag(self) -> None:
+        cleaned = TextCleaner.clean("please update the voiceflow @dmg release")
+        self.assertNotIn("@dmg", cleaned.lower())
+        self.assertIn("dmg", cleaned.lower())
+
     def test_normal_mode_skips_file_tagging(self) -> None:
         cleaned = TextCleaner.clean(
             "please update function.py file",
@@ -311,6 +325,22 @@ class TextCleanerBehaviorTests(unittest.TestCase):
     def test_js_homophone_not_applied_to_plain_chess_sentence(self) -> None:
         cleaned = TextCleaner.clean("we should play chess later")
         self.assertEqual(cleaned.lower(), "we should play chess later")
+
+    def test_prunes_low_information_repetition_in_sentence(self) -> None:
+        text = "we can see, let's see, this should remain in the same sentence now"
+        cleaned = TextCleaner.clean(text).lower()
+        self.assertNotIn("we can see", cleaned)
+        self.assertNotIn("let's see", cleaned)
+        self.assertIn("this should remain in the same sentence now", cleaned)
+
+    def test_normalize_readability_adds_sentence_case_and_punctuation(self) -> None:
+        cleaned = TextCleaner.clean("okay now i'm just testing this and we should verify output")
+        self.assertTrue(cleaned.startswith("Now I'm"))
+        self.assertTrue(cleaned.endswith("."))
+
+    def test_trailing_conjunction_is_removed_before_period(self) -> None:
+        cleaned = TextCleaner.clean("now we should deploy but")
+        self.assertEqual(cleaned, "Now we should deploy")
 
 
 if __name__ == "__main__":

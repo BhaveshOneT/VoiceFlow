@@ -11,6 +11,15 @@ _FILLER_REPLACE_SPACE = re.compile(
     r',?\s*\b(you know|sort of|kind of|basically|literally)\b\s*,?',
     re.IGNORECASE,
 )
+_INLINE_DISCOURSE_RE = re.compile(
+    r"\b(?:we can see|you can see|we'?ll see|let'?s see)\b",
+    re.IGNORECASE,
+)
+_HESITATION_CHAIN_RE = re.compile(
+    r"\b(?:i don't know|i do not know)\s+(?:yeah\s+)?maybe\b",
+    re.IGNORECASE,
+)
+_YEAH_FILLER_RE = re.compile(r"(?:(?<=\s)|^)(?:yeah|yep)(?=(?:\s|$|[,.!?;:]))", re.IGNORECASE)
 
 _REPEATED_WORD = re.compile(r'\b(\w+)(\s+\1)+\b', re.IGNORECASE)
 
@@ -91,6 +100,7 @@ _FILE_EXTS = (
     "css",
     "scss",
     "vue",
+    "dmg",
 )
 _FILE_EXT_ALT = "|".join(_FILE_EXTS)
 _EXPLICIT_FILE_RE = re.compile(
@@ -178,6 +188,24 @@ _DUPLICATE_SYMBOL_TAG_RE = re.compile(
     r"(@[A-Za-z_][A-Za-z0-9_.:-]*)(?:\s+\1)+"
 )
 _CLAUSE_SPLIT_RE = re.compile(r'(?<=[.!?;:])\s+')
+_SOFT_CLAUSE_SPLIT_RE = re.compile(r'(?<=[,.!?;:])\s+')
+_LOW_INFO_FRAGMENT_RE = re.compile(
+    r"^(?:"
+    r"okay|ok|yeah|right|you know|i mean|let'?s see|we can see|you can see|"
+    r"we'?ll see|i guess|i don't know|i do not know"
+    r")$",
+    re.IGNORECASE,
+)
+_TRIM_EDGE_PUNCT_RE = re.compile(r"^[\s,;:.!?-]+|[\s,;:.!?-]+$")
+_LEADING_LOWER_RE = re.compile(r"(^|(?<=[.!?]\s))([a-z])")
+_I_CONTRACTION_RE = re.compile(r"\bi(?=('|’)(m|d|ll|ve|re|s)\b)", re.IGNORECASE)
+_STANDALONE_I_RE = re.compile(r"\bi\b", re.IGNORECASE)
+_TERMINAL_PUNCT_RE = re.compile(r'[.!?]["\')\]]?$')
+_LONE_EXTENSION_TAG_RE = re.compile(rf'(?<![\w])@(?P<ext>{_FILE_EXT_ALT})\b', re.IGNORECASE)
+_TRAILING_CONJUNCTION_RE = re.compile(
+    r"\b(?:and|or|but|so|because|then)\b\s*$",
+    re.IGNORECASE,
+)
 _STRONG_REPLACE_CUES = {
     "no no",
     "no wait",
@@ -204,6 +232,10 @@ class TextCleaner:
     ) -> str:
         for pattern in _FILLER_REMOVE:
             text = pattern.sub('', text)
+        text = _LEADING_DISCOURSE.sub('', text)
+        text = _INLINE_DISCOURSE_RE.sub(' ', text)
+        text = _HESITATION_CHAIN_RE.sub('maybe', text)
+        text = _YEAH_FILLER_RE.sub(' ', text)
         text = _FILLER_REPLACE_SPACE.sub(' ', text)
         text = _REPEATED_WORD.sub(cls._dedupe_repeated_word, text)
         text = cls._normalize_spoken_acronyms(text)
@@ -214,11 +246,15 @@ class TextCleaner:
 
         text = cls._apply_self_corrections(text)
         text = cls._collapse_repeated_clauses(text)
+        text = cls._prune_low_information_fragments(text)
         if programmer_mode:
             text = cls._tag_file_mentions(text)
             text = cls._tag_symbol_mentions(text)
+        text = cls._normalize_readability(text)
         text = re.sub(r'\s{2,}', ' ', text)
         text = re.sub(r'\s+([.,!?;:])', r'\1', text)
+        text = re.sub(r',([.!?])', r'\1', text)
+        text = re.sub(r',\s*$', '', text)
         text = re.sub(r'^[,\s]+', '', text)
         return text.strip()
 
@@ -232,6 +268,10 @@ class TextCleaner:
         """Conservative cleanup that avoids sentence replacement heuristics."""
         for pattern in _FILLER_REMOVE:
             text = pattern.sub('', text)
+        text = _LEADING_DISCOURSE.sub('', text)
+        text = _INLINE_DISCOURSE_RE.sub(' ', text)
+        text = _HESITATION_CHAIN_RE.sub('maybe', text)
+        text = _YEAH_FILLER_RE.sub(' ', text)
         text = _FILLER_REPLACE_SPACE.sub(' ', text)
         text = _REPEATED_WORD.sub(cls._dedupe_repeated_word, text)
         text = cls._normalize_spoken_acronyms(text)
@@ -239,11 +279,15 @@ class TextCleaner:
             for wrong, right in sorted(dictionary.items(), key=lambda kv: -len(kv[0])):
                 text = re.sub(re.escape(wrong), right, text, flags=re.IGNORECASE)
         text = cls._collapse_repeated_clauses(text)
+        text = cls._prune_low_information_fragments(text)
         if programmer_mode:
             text = cls._tag_file_mentions(text)
             text = cls._tag_symbol_mentions(text)
+        text = cls._normalize_readability(text)
         text = re.sub(r'\s{2,}', ' ', text)
         text = re.sub(r'\s+([.,!?;:])', r'\1', text)
+        text = re.sub(r',([.!?])', r'\1', text)
+        text = re.sub(r',\s*$', '', text)
         text = re.sub(r'^[,\s]+', '', text)
         return text.strip()
 
@@ -384,6 +428,7 @@ class TextCleaner:
         text = _EXPLICIT_FILE_RE.sub(cls._replace_explicit_file, text)
         text = _BARE_FILE_RE.sub(cls._replace_bare_file, text)
         text = _DUPLICATE_FILE_TAG_RE.sub("@", text)
+        text = _LONE_EXTENSION_TAG_RE.sub(r"\g<ext>", text)
         return text
 
     @classmethod
@@ -428,7 +473,7 @@ class TextCleaner:
     def _replace_bare_file(match: re.Match[str]) -> str:
         base = match.group("base").strip()
         lowered = base.lower()
-        if lowered in _GENERIC_FILE_BASES:
+        if lowered in _GENERIC_FILE_BASES or lowered in _FILE_EXTS:
             return match.group(0)
         tag = re.sub(r"\s+", "_", base.strip())
         return f"@{tag}"
@@ -461,3 +506,52 @@ class TextCleaner:
             return match.group(0)
 
         return _JS_HOMOPHONE_RE.sub(_js_homophone, text)
+
+    @classmethod
+    def _prune_low_information_fragments(cls, text: str) -> str:
+        """Drop repetitive low-information discourse fragments from mixed sentences."""
+        chunks = [chunk.strip() for chunk in _SOFT_CLAUSE_SPLIT_RE.split(text.strip()) if chunk.strip()]
+        if len(chunks) < 2:
+            return text
+
+        normalized = [cls._normalize_fragment(chunk) for chunk in chunks]
+        non_low_count = sum(0 if cls._is_low_info_fragment(norm) else 1 for norm in normalized)
+        if non_low_count == 0:
+            return chunks[0]
+
+        out: list[str] = []
+        previous_norm = ""
+        for chunk, norm in zip(chunks, normalized):
+            if not norm:
+                continue
+            if cls._is_low_info_fragment(norm):
+                continue
+            if norm == previous_norm:
+                continue
+            out.append(chunk)
+            previous_norm = norm
+
+        return " ".join(out) if out else chunks[0]
+
+    @staticmethod
+    def _normalize_fragment(text: str) -> str:
+        stripped = _TRIM_EDGE_PUNCT_RE.sub("", text.lower())
+        return re.sub(r"\s+", " ", stripped).strip()
+
+    @staticmethod
+    def _is_low_info_fragment(normalized: str) -> bool:
+        return bool(_LOW_INFO_FRAGMENT_RE.match(normalized))
+
+    @classmethod
+    def _normalize_readability(cls, text: str) -> str:
+        text = text.strip()
+        text = text.rstrip(" ,;:")
+        text = _TRAILING_CONJUNCTION_RE.sub("", text).rstrip(" ,;:")
+        text = _I_CONTRACTION_RE.sub("I", text)
+        text = _STANDALONE_I_RE.sub("I", text)
+        text = _LEADING_LOWER_RE.sub(lambda m: f"{m.group(1)}{m.group(2).upper()}", text)
+
+        words = text.split()
+        if len(words) >= 8 and not _TERMINAL_PUNCT_RE.search(text.strip()):
+            text = text.rstrip() + "."
+        return text

@@ -221,6 +221,18 @@ _VERB_PREFIX_TAG_FILE_RE = re.compile(
     rf"(?P<prefix>[A-Za-z0-9_-]{{2,}})\s+@(?P<name>[A-Za-z0-9_-]+\.(?:{_FILE_EXT_ALT}))\b",
     re.IGNORECASE,
 )
+_FILE_ACTION_CUE_RE = re.compile(
+    r"\b(update|rename|modify|edit|open|create|delete|move|copy|refactor|fix)\b",
+    re.IGNORECASE,
+)
+_FILE_CONTEXT_CUE_RE = re.compile(
+    r"\b(file|filename|path|module|script|config)\b",
+    re.IGNORECASE,
+)
+_FILE_LIST_CUE_RE = re.compile(
+    r"\b(like|such as|terms?|libraries|frameworks?)\b",
+    re.IGNORECASE,
+)
 _FRAGMENTED_TAG_RE = re.compile(
     rf'@(?P<left>[A-Za-z0-9_-]+)(?P<sep>[-_])@(?P<right>[A-Za-z0-9_-]+\.(?:{_FILE_EXT_ALT}))\b',
     re.IGNORECASE,
@@ -535,6 +547,10 @@ class TextCleaner:
     def _replace_spoken_file(match: re.Match[str]) -> str:
         base = match.group("base")
         ext = match.group("ext").lower()
+        if not TextCleaner._has_file_action_context(match):
+            return f"{base}.{ext}"
+        if f"{base}.{ext}".lower() in _FRAMEWORK_FILE_TOKENS:
+            return f"{base}.{ext}"
         return f"@{base}.{ext}"
 
     @staticmethod
@@ -544,12 +560,16 @@ class TextCleaner:
         base = re.sub(r"\s+(?:underscore|under score)\s+", "_", base, flags=re.IGNORECASE)
         base = re.sub(r"\s+(?:dash|hyphen)\s+", "-", base, flags=re.IGNORECASE)
         base = re.sub(r"\s+", "_", base)
+        if not TextCleaner._has_file_action_context(match):
+            return f"{base}.{ext}"
         return f"@{base}.{ext}"
 
     @staticmethod
     def _replace_explicit_file(match: re.Match[str]) -> str:
         name = match.group("name")
         if name.lower() in _FRAMEWORK_FILE_TOKENS:
+            return name
+        if not TextCleaner._has_file_action_context(match):
             return name
         return f"@{name}"
 
@@ -558,6 +578,8 @@ class TextCleaner:
         base = match.group("base").strip()
         lowered = base.lower()
         if lowered in _GENERIC_FILE_BASES or lowered in _FILE_EXTS:
+            return match.group(0)
+        if not TextCleaner._has_file_action_context(match):
             return match.group(0)
         tag = re.sub(r"\s+", "_", base.strip())
         return f"@{tag}"
@@ -607,6 +629,24 @@ class TextCleaner:
     def _untag_js_list(match: re.Match[str]) -> str:
         body = match.group("body").replace("@", "")
         return f"{match.group('prefix')}{body}"
+
+    @staticmethod
+    def _has_file_action_context(match: re.Match[str]) -> bool:
+        """Require nearby file-action cues before adding @file tags."""
+        text = match.string
+        start = match.start()
+        end = match.end()
+        left = text[max(0, start - 72):start]
+        right = text[end:min(len(text), end + 24)]
+
+        # Avoid tagging terms in "like X, Y" enumerations.
+        if _FILE_LIST_CUE_RE.search(left) and not _FILE_CONTEXT_CUE_RE.search(left):
+            return False
+
+        left_has_action = bool(_FILE_ACTION_CUE_RE.search(left))
+        left_has_file_context = bool(_FILE_CONTEXT_CUE_RE.search(left))
+        right_has_file_context = bool(_FILE_CONTEXT_CUE_RE.search(right))
+        return left_has_action or left_has_file_context or right_has_file_context
 
     @classmethod
     def _normalize_spoken_acronyms(cls, text: str) -> str:

@@ -192,8 +192,6 @@ class PipelineRefinementGateTests(unittest.TestCase):
             "_trim_silence_for_decode",
             return_value=(audio, False),
         ), mock.patch.object(
-            pipeline, "_has_speech", return_value=True
-        ), mock.patch.object(
             pipeline,
             "_transcribe_adaptive",
             return_value="please update function.py file",
@@ -210,8 +208,6 @@ class PipelineRefinementGateTests(unittest.TestCase):
             pipeline,
             "_trim_silence_for_decode",
             return_value=(audio, False),
-        ), mock.patch.object(
-            pipeline, "_has_speech", return_value=True
         ), mock.patch.object(
             pipeline,
             "_transcribe_adaptive",
@@ -267,38 +263,18 @@ class SanitizeLeakDetectionTests(unittest.TestCase):
         self.assertEqual(TextRefiner._sanitize_output(leaked), "")
 
 
-class VADAndHallucinationGuardTests(unittest.TestCase):
-    """Tests for VAD silence guard, hallucination blocklist, and prompt echo detection."""
+class HallucinationAndEchoGuardTests(unittest.TestCase):
+    """Tests for hallucination blocklist and prompt echo detection."""
 
     def setUp(self) -> None:
         config = AppConfig(cleanup_mode="fast")
         self.pipeline = TranscriptionPipeline(config=config, dictionary=Dictionary())
-
-    def test_silent_audio_detected_by_vad_returns_empty(self) -> None:
-        """Silent audio should produce empty output (VAD finds no speech)."""
-        audio = np.zeros(16000, dtype=np.float32)
-        with mock.patch.object(
-            self.pipeline._vad, "speech_probability", return_value=0.1
-        ), mock.patch.object(
-            self.pipeline, "_trim_silence_for_decode", return_value=(audio, False)
-        ):
-            result = self.pipeline.process(audio)
-        self.assertEqual(result, "")
-
-    def test_speech_audio_detected_by_vad_returns_true(self) -> None:
-        """Audio with speech above threshold should pass the VAD gate."""
-        audio = np.random.randn(16000).astype(np.float32) * 0.05
-        self.pipeline._vad = mock.MagicMock()
-        self.pipeline._vad.speech_probability.return_value = 0.9
-        self.assertTrue(self.pipeline._has_speech(audio))
 
     def test_hallucination_blocklist_catches_thank_you(self) -> None:
         """Whisper hallucination 'Thank you.' should be discarded."""
         audio = np.ones(16000, dtype=np.float32)
         with mock.patch.object(
             self.pipeline, "_trim_silence_for_decode", return_value=(audio, False)
-        ), mock.patch.object(
-            self.pipeline, "_has_speech", return_value=True
         ), mock.patch.object(
             self.pipeline, "_transcribe_adaptive", return_value="Thank you."
         ):
@@ -310,8 +286,6 @@ class VADAndHallucinationGuardTests(unittest.TestCase):
         audio = np.ones(16000, dtype=np.float32)
         with mock.patch.object(
             self.pipeline, "_trim_silence_for_decode", return_value=(audio, False)
-        ), mock.patch.object(
-            self.pipeline, "_has_speech", return_value=True
         ), mock.patch.object(
             self.pipeline,
             "_transcribe_adaptive",
@@ -326,8 +300,6 @@ class VADAndHallucinationGuardTests(unittest.TestCase):
         with mock.patch.object(
             self.pipeline, "_trim_silence_for_decode", return_value=(audio, False)
         ), mock.patch.object(
-            self.pipeline, "_has_speech", return_value=True
-        ), mock.patch.object(
             self.pipeline,
             "_transcribe_adaptive",
             return_value="Transcribe clearly with natural punctuation.",
@@ -340,8 +312,6 @@ class VADAndHallucinationGuardTests(unittest.TestCase):
         audio = np.ones(16000, dtype=np.float32)
         with mock.patch.object(
             self.pipeline, "_trim_silence_for_decode", return_value=(audio, False)
-        ), mock.patch.object(
-            self.pipeline, "_has_speech", return_value=True
         ), mock.patch.object(
             self.pipeline,
             "_transcribe_adaptive",

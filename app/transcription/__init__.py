@@ -12,8 +12,6 @@ import numpy as np
 from app.config import AppConfig
 from app.dictionary import Dictionary
 
-from app.audio.vad import VoiceActivityDetector
-
 from .text_cleaner import TextCleaner
 from .text_refiner import TextRefiner
 from .whisper_engine import WhisperEngine
@@ -121,7 +119,6 @@ class TranscriptionPipeline:
             language=config.language,
         )
         self.cleaner = TextCleaner
-        self._vad = VoiceActivityDetector()
         self.refiner: Optional[TextRefiner] = None
 
         # Load LLM refiner for standard and max_accuracy modes
@@ -136,11 +133,6 @@ class TranscriptionPipeline:
         audio, trimmed = self._trim_silence_for_decode(audio)
         decode_samples = int(audio.size)
         programmer_mode = self._programmer_mode_enabled()
-
-        # 0. VAD speech check -- skip Whisper if no speech detected
-        if not self._has_speech(audio):
-            log.info("VAD: no speech detected in audio; discarding")
-            return ""
 
         # 1. Whisper transcription
         stt_started = time.perf_counter()
@@ -502,15 +494,6 @@ class TranscriptionPipeline:
                 return audio, False
 
         return trimmed, True
-
-    def _has_speech(self, audio: np.ndarray, threshold: float = 0.5) -> bool:
-        """Check whether any 512-sample chunk exceeds the VAD speech threshold."""
-        chunk_size = 512
-        for i in range(0, len(audio) - chunk_size + 1, chunk_size):
-            prob = self._vad.speech_probability(audio[i : i + chunk_size])
-            if prob > threshold:
-                return True
-        return False
 
     def _should_refine(self, text: str, raw_text: str | None = None) -> bool:
         """Heuristic gate to avoid unnecessary LLM calls and reduce latency."""

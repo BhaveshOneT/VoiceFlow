@@ -48,8 +48,7 @@ class VoiceActivityDetector:
         self.silence_counter = 0
 
         self._session: Optional[ort.InferenceSession] = None
-        self._h = np.zeros((2, 1, 64), dtype=np.float32)
-        self._c = np.zeros((2, 1, 64), dtype=np.float32)
+        self._state = np.zeros((2, 1, 128), dtype=np.float32)
 
     def process_chunk(self, chunk: np.ndarray) -> Optional[np.ndarray]:
         """Feed a ~32ms chunk. Returns complete utterance when speech ends."""
@@ -86,8 +85,7 @@ class VoiceActivityDetector:
         self.speech_chunks = []
         self.silence_counter = 0
         self.pre_buffer.clear()
-        self._h = np.zeros((2, 1, 64), dtype=np.float32)
-        self._c = np.zeros((2, 1, 64), dtype=np.float32)
+        self._state = np.zeros((2, 1, 128), dtype=np.float32)
 
     def _ensure_model(self) -> None:
         """Download ONNX model if not cached, then load session."""
@@ -149,10 +147,9 @@ class VoiceActivityDetector:
 
         ort_inputs = {
             "input": audio,
+            "state": self._state,
             "sr": sr,
-            "h": self._h,
-            "c": self._c,
         }
 
-        output, self._h, self._c = self._session.run(None, ort_inputs)
+        output, self._state = self._session.run(None, ort_inputs)
         return float(output.squeeze())

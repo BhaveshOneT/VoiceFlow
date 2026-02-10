@@ -9,9 +9,9 @@ log = logging.getLogger(__name__)
 
 DEFAULT_MODEL = "mlx-community/whisper-large-v3-turbo"
 _TEMPERATURE = (0.0, 0.2)
-_COMPRESSION_RATIO_THRESHOLD = 2.4
-_LOGPROB_THRESHOLD = -1.0
-_NO_SPEECH_THRESHOLD = 0.6
+_COMPRESSION_RATIO_THRESHOLD = 2.0
+_LOGPROB_THRESHOLD = -0.8
+_NO_SPEECH_THRESHOLD = 0.4
 
 
 class WhisperEngine:
@@ -66,18 +66,18 @@ class WhisperEngine:
         """
         if self.language == "de":
             base = (
-                "Die folgende Aufnahme stammt aus einer Softwareentwicklungssitzung. "
-                "Bitte klar und korrekt transkribieren."
+                "Besprechungsnotizen: Wir haben die API-Änderungen "
+                "und den Deployment-Zeitplan besprochen."
             )
         elif self.language == "auto":
             base = (
-                "This is a software development dictation in English or German. "
-                "Transcribe clearly with natural punctuation."
+                "Meeting notes: We discussed the API changes and deployment timeline. "
+                "Die Tests laufen erfolgreich."
             )
         else:
             base = (
-                "The following is a clean, well-punctuated transcription "
-                "from a software development session."
+                "Meeting notes: We discussed the API changes "
+                "and deployment timeline."
             )
         if tech_context:
             return f"{base} {tech_context}"

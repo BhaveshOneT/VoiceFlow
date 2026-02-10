@@ -137,7 +137,7 @@ class TextRefiner:
 
         # Keep response bounded to avoid latency/context bloat. Long texts are
         # already gated out of LLM refinement by TranscriptionPipeline.
-        max_tokens = min(max(int(len(text.split()) * 1.2), 20), 80)
+        max_tokens = min(max(int(len(text.split()) * 1.4), 24), 160)
         sampler = make_sampler(temp=0.0)
         result = generate(
             self.model,
@@ -192,6 +192,21 @@ class TextRefiner:
         if not text:
             return ""
 
+        # Structural leak: numbered or bulleted instruction lists
+        if re.search(
+            r"(?m)^(?:\d+\.\s|[-*]\s).*"
+            r"(?:output|clean|never|always|remove|handle|keep|preserve|use)\b",
+            text,
+            re.IGNORECASE,
+        ):
+            lines_check = [l.strip() for l in text.splitlines() if l.strip()]
+            rule_lines = sum(
+                1 for l in lines_check
+                if re.match(r"^\d+\.\s|^[-*]\s", l)
+            )
+            if rule_lines >= 2:
+                return ""
+
         lines = [line.strip() for line in text.splitlines() if line.strip()]
         for line in lines or [text]:
             candidate = line.strip().strip("`").strip()
@@ -219,11 +234,38 @@ class TextRefiner:
                 "refined version",
                 "rewritten version",
                 "concise and directly",
+                "speech-to-text post-processor",
+                "output only cleaned",
+                "never answer, explain",
+                "keep all intended details",
+                "preserve full meaning",
+                "handle self-corrections",
+                "remove filler words",
+                "use vocabulary corrections",
+                "disfluent",
+                "here is the cleaned",
+                "post-processor",
             )
             if any(marker in lower for marker in leak_markers):
                 continue
+            if TextRefiner._resembles_system_prompt(candidate):
+                continue
             return candidate
         return ""
+
+    @staticmethod
+    def _resembles_system_prompt(candidate: str) -> bool:
+        """Reject text that has high word overlap with our system prompt."""
+        candidate_words = set(_TOKEN_RE.findall(candidate.lower()))
+        if len(candidate_words) < 6:
+            return False
+        prompt_words = set(_TOKEN_RE.findall(SYSTEM_PROMPT_TEMPLATE.lower()))
+        intersection = candidate_words & prompt_words
+        union = candidate_words | prompt_words
+        if not union:
+            return False
+        similarity = len(intersection) / len(union)
+        return similarity > 0.5
 
     @staticmethod
     def _looks_like_question(text: str) -> bool:

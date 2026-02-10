@@ -76,6 +76,11 @@ class VoiceActivityDetector:
 
         return None
 
+    def speech_probability(self, chunk: np.ndarray) -> float:
+        """Return speech probability for a single audio chunk (public API)."""
+        self._ensure_model()
+        return self._infer(chunk)
+
     def reset(self) -> None:
         """Reset all state for a new utterance."""
         self.speech_chunks = []

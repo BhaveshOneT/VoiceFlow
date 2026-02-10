@@ -153,7 +153,9 @@ class PipelineRefinementGateTests(unittest.TestCase):
         audio = np.zeros(16000 * 190, dtype=np.float32)  # 3m10s
         chunks = self.pipeline._split_for_long_transcription(audio)
         self.assertGreater(len(chunks), 1)
-        self.assertEqual(chunks[0].size, int(42.0 * 16000))
+        # First chunk may shift by up to 8000 samples due to silence-aware splitting.
+        expected = int(42.0 * 16000)
+        self.assertAlmostEqual(chunks[0].size, expected, delta=8000)
         self.assertGreaterEqual(chunks[-1].size, int(12.0 * 16000))
 
     def test_merge_transcript_parts_removes_overlap(self) -> None:
@@ -190,6 +192,8 @@ class PipelineRefinementGateTests(unittest.TestCase):
             "_trim_silence_for_decode",
             return_value=(audio, False),
         ), mock.patch.object(
+            pipeline, "_has_speech", return_value=True
+        ), mock.patch.object(
             pipeline,
             "_transcribe_adaptive",
             return_value="please update function.py file",
@@ -206,6 +210,8 @@ class PipelineRefinementGateTests(unittest.TestCase):
             pipeline,
             "_trim_silence_for_decode",
             return_value=(audio, False),
+        ), mock.patch.object(
+            pipeline, "_has_speech", return_value=True
         ), mock.patch.object(
             pipeline,
             "_transcribe_adaptive",
@@ -237,6 +243,112 @@ class PipelineRefinementGateTests(unittest.TestCase):
         self.assertGreaterEqual(mocked.call_count, 3)
         self.assertIn("deploy to staging", merged.lower())
         self.assertIn("rollback checklist", merged.lower())
+
+
+class SanitizeLeakDetectionTests(unittest.TestCase):
+    def test_sanitize_catches_expanded_leak_markers(self) -> None:
+        for phrase in (
+            "You are a speech-to-text post-processor.",
+            "Here is the cleaned version of your text.",
+        ):
+            with self.subTest(phrase=phrase):
+                self.assertEqual(TextRefiner._sanitize_output(phrase), "")
+
+    def test_sanitize_catches_structural_leaks(self) -> None:
+        text = "1. Output only cleaned text\n2. Never add content"
+        self.assertEqual(TextRefiner._sanitize_output(text), "")
+
+    def test_system_prompt_similarity_rejection(self) -> None:
+        leaked = (
+            "You are a speech-to-text post-processor. "
+            "Output only cleaned transcription text. "
+            "Never answer, explain, summarize, or add content."
+        )
+        self.assertEqual(TextRefiner._sanitize_output(leaked), "")
+
+
+class VADAndHallucinationGuardTests(unittest.TestCase):
+    """Tests for VAD silence guard, hallucination blocklist, and prompt echo detection."""
+
+    def setUp(self) -> None:
+        config = AppConfig(cleanup_mode="fast")
+        self.pipeline = TranscriptionPipeline(config=config, dictionary=Dictionary())
+
+    def test_silent_audio_detected_by_vad_returns_empty(self) -> None:
+        """Silent audio should produce empty output (VAD finds no speech)."""
+        audio = np.zeros(16000, dtype=np.float32)
+        with mock.patch.object(
+            self.pipeline._vad, "speech_probability", return_value=0.1
+        ), mock.patch.object(
+            self.pipeline, "_trim_silence_for_decode", return_value=(audio, False)
+        ):
+            result = self.pipeline.process(audio)
+        self.assertEqual(result, "")
+
+    def test_speech_audio_detected_by_vad_returns_true(self) -> None:
+        """Audio with speech above threshold should pass the VAD gate."""
+        audio = np.random.randn(16000).astype(np.float32) * 0.05
+        self.pipeline._vad = mock.MagicMock()
+        self.pipeline._vad.speech_probability.return_value = 0.9
+        self.assertTrue(self.pipeline._has_speech(audio))
+
+    def test_hallucination_blocklist_catches_thank_you(self) -> None:
+        """Whisper hallucination 'Thank you.' should be discarded."""
+        audio = np.ones(16000, dtype=np.float32)
+        with mock.patch.object(
+            self.pipeline, "_trim_silence_for_decode", return_value=(audio, False)
+        ), mock.patch.object(
+            self.pipeline, "_has_speech", return_value=True
+        ), mock.patch.object(
+            self.pipeline, "_transcribe_adaptive", return_value="Thank you."
+        ):
+            result = self.pipeline.process(audio)
+        self.assertEqual(result, "")
+
+    def test_hallucination_blocklist_allows_thank_you_in_sentence(self) -> None:
+        """'Thank you' within a real sentence should not be blocked."""
+        audio = np.ones(16000, dtype=np.float32)
+        with mock.patch.object(
+            self.pipeline, "_trim_silence_for_decode", return_value=(audio, False)
+        ), mock.patch.object(
+            self.pipeline, "_has_speech", return_value=True
+        ), mock.patch.object(
+            self.pipeline,
+            "_transcribe_adaptive",
+            return_value="I want to thank you for helping me with the code review.",
+        ):
+            result = self.pipeline.process(audio)
+        self.assertIn("thank you", result.lower())
+
+    def test_prompt_echo_detection_catches_transcribe_clearly(self) -> None:
+        """Short output echoing the system prompt should be discarded."""
+        audio = np.ones(16000, dtype=np.float32)
+        with mock.patch.object(
+            self.pipeline, "_trim_silence_for_decode", return_value=(audio, False)
+        ), mock.patch.object(
+            self.pipeline, "_has_speech", return_value=True
+        ), mock.patch.object(
+            self.pipeline,
+            "_transcribe_adaptive",
+            return_value="Transcribe clearly with natural punctuation.",
+        ):
+            result = self.pipeline.process(audio)
+        self.assertEqual(result, "")
+
+    def test_prompt_echo_allows_normal_text(self) -> None:
+        """Normal transcription text should pass prompt echo detection."""
+        audio = np.ones(16000, dtype=np.float32)
+        with mock.patch.object(
+            self.pipeline, "_trim_silence_for_decode", return_value=(audio, False)
+        ), mock.patch.object(
+            self.pipeline, "_has_speech", return_value=True
+        ), mock.patch.object(
+            self.pipeline,
+            "_transcribe_adaptive",
+            return_value="We need to update the deployment scripts for staging.",
+        ):
+            result = self.pipeline.process(audio)
+        self.assertIn("update the deployment scripts", result.lower())
 
 
 class TextCleanerBehaviorTests(unittest.TestCase):
@@ -410,6 +522,69 @@ class TextCleanerBehaviorTests(unittest.TestCase):
             "if i ask, should we ship today or wait for one more smoke test?",
             cleaned.lower(),
         )
+
+
+class LongTranscriptionContentLossTests(unittest.TestCase):
+    def setUp(self) -> None:
+        config = AppConfig(cleanup_mode="standard")
+        self.pipeline = TranscriptionPipeline(config=config, dictionary=Dictionary())
+
+    def test_should_refine_hard_cap_at_60_words(self) -> None:
+        words = ["word"] * 64
+        words[10] = "sorry"  # correction cue that would normally trigger refinement
+        text = " ".join(words)
+        self.assertFalse(self.pipeline._should_refine(text))
+
+    def test_should_refine_allows_correction_cues_under_60_words(self) -> None:
+        text = "I want to update the parser module sorry the refiner module instead please"
+        self.assertTrue(self.pipeline._should_refine(text))
+
+    def test_fuzzy_overlap_tolerates_minor_differences(self) -> None:
+        left = "alpha bravo charlie delta echo foxtrot golf hotel".split()
+        # One word differs in the 8-word overlap region
+        right = "alpha bravo charlie delta echo foxtrox golf hotel india juliet".split()
+        overlap = TranscriptionPipeline._find_token_overlap(left, right)
+        self.assertEqual(overlap, 8)
+
+    def test_fuzzy_overlap_exact_match_still_preferred(self) -> None:
+        left = "the quick brown fox jumps over the lazy dog".split()
+        right = "over the lazy dog and then runs away".split()
+        overlap = TranscriptionPipeline._find_token_overlap(left, right)
+        self.assertEqual(overlap, 4)
+
+    def test_completeness_catches_severe_drops_without_orphan(self) -> None:
+        raw = (
+            "we are setting things up and it is good to go but we still need to check "
+            "if it actually worked and keep writing more sentences while tracking bugs "
+            "that still need fixes before release."
+        )
+        # Cleaned text is < 55% of raw words and ends with a period (no orphan)
+        cleaned = "we still need to check if it worked before release."
+        raw_words = len(raw.split())
+        cleaned_words = len(cleaned.split())
+        self.assertLess(cleaned_words, int(raw_words * 0.55))
+        out = self.pipeline._preserve_completeness(
+            raw, cleaned, {}, programmer_mode=True
+        )
+        self.assertGreater(len(out.split()), cleaned_words)
+
+    def test_split_prefers_silence_boundaries(self) -> None:
+        sample_rate = 16000
+        duration_s = 130.0
+        total_samples = int(duration_s * sample_rate)
+        audio = np.full(total_samples, 0.05, dtype=np.float32)
+        # Insert a quiet region near where the first split would land (~42s mark)
+        quiet_center = int(42.0 * sample_rate)
+        quiet_start = max(quiet_center - 3200, 0)
+        quiet_end = min(quiet_center + 3200, total_samples)
+        audio[quiet_start:quiet_end] = 0.0001
+
+        chunks = TranscriptionPipeline._split_for_long_transcription(audio)
+        self.assertGreater(len(chunks), 1)
+        first_chunk_end = chunks[0].size
+        # The split point should land within the quiet region (+/- window)
+        self.assertGreaterEqual(first_chunk_end, quiet_start - 8000)
+        self.assertLessEqual(first_chunk_end, quiet_end + 8000)
 
 
 if __name__ == "__main__":

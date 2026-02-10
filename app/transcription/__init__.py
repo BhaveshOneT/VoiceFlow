@@ -12,6 +12,8 @@ import numpy as np
 from app.config import AppConfig
 from app.dictionary import Dictionary
 
+from app.audio.vad import VoiceActivityDetector
+
 from .text_cleaner import TextCleaner
 from .text_refiner import TextRefiner
 from .whisper_engine import WhisperEngine
@@ -62,6 +64,25 @@ _TOKEN_SPLIT_RE = re.compile(r"\S+")
 _MIN_OVERLAP_WORDS = 4
 _MAX_OVERLAP_WORDS = 20
 
+_HALLUCINATION_PATTERNS = [
+    re.compile(r"^thank you\.?$", re.IGNORECASE),
+    re.compile(r"^thanks\.?$", re.IGNORECASE),
+    re.compile(r"^thanks for watching\.?$", re.IGNORECASE),
+    re.compile(r"^you$", re.IGNORECASE),
+    re.compile(r"^\.+$"),
+    re.compile(r"^,+$"),
+]
+
+_PROMPT_ECHO_FRAGMENTS = [
+    "transcribe clearly",
+    "natural punctuation",
+    "software development dictation",
+    "clean, well-punctuated transcription",
+    "software development session",
+    "softwareentwicklungssitzung",
+    "klar und korrekt transkribieren",
+]
+
 
 def _log_transcript(stage: str, text: str) -> None:
     """Log transcript content only when explicitly enabled."""
@@ -100,6 +121,7 @@ class TranscriptionPipeline:
             language=config.language,
         )
         self.cleaner = TextCleaner
+        self._vad = VoiceActivityDetector()
         self.refiner: Optional[TextRefiner] = None
 
         # Load LLM refiner for standard and max_accuracy modes
@@ -115,12 +137,30 @@ class TranscriptionPipeline:
         decode_samples = int(audio.size)
         programmer_mode = self._programmer_mode_enabled()
 
+        # 0. VAD speech check -- skip Whisper if no speech detected
+        if not self._has_speech(audio):
+            log.info("VAD: no speech detected in audio; discarding")
+            return ""
+
         # 1. Whisper transcription
         stt_started = time.perf_counter()
         tech_context = self.dictionary.get_whisper_context() if programmer_mode else ""
         raw = self._transcribe_adaptive(audio, tech_context=tech_context)
         stt_ms = (time.perf_counter() - stt_started) * 1000.0
         _log_transcript("Raw transcription", raw)
+
+        # Hallucination blocklist -- discard common Whisper silence hallucinations
+        raw_stripped = raw.strip()
+        if any(pat.match(raw_stripped) for pat in _HALLUCINATION_PATTERNS):
+            log.info("Hallucination blocklist matched; discarding output")
+            return ""
+
+        # Prompt echo detection -- discard if Whisper echoes the prompt
+        raw_lower = raw_stripped.lower()
+        if len(raw_stripped.split()) < 15:
+            if any(frag in raw_lower for frag in _PROMPT_ECHO_FRAGMENTS):
+                log.info("Prompt echo detected; discarding output")
+                return ""
 
         if not raw.strip():
             total_ms = (time.perf_counter() - total_started) * 1000.0
@@ -265,6 +305,29 @@ class TranscriptionPipeline:
         return merged
 
     @staticmethod
+    def _find_best_split_point(
+        audio: np.ndarray, target_idx: int, window_samples: int = 8000
+    ) -> int:
+        """Find the quietest 20ms frame within +/-window_samples of target_idx."""
+        frame_size = 320  # 20 ms at 16 kHz
+        lo = max(target_idx - window_samples, 0)
+        hi = min(target_idx + window_samples, int(audio.size))
+        if hi - lo < frame_size:
+            return max(0, min(target_idx, int(audio.size)))
+
+        best_idx = target_idx
+        best_rms = float("inf")
+        pos = lo
+        while pos + frame_size <= hi:
+            frame = audio[pos : pos + frame_size]
+            rms = float(np.sqrt(np.mean(np.square(frame))))
+            if rms < best_rms:
+                best_rms = rms
+                best_idx = pos
+            pos += frame_size
+        return max(0, min(best_idx, int(audio.size)))
+
+    @staticmethod
     def _split_for_long_transcription(audio: np.ndarray) -> list[np.ndarray]:
         """Split long audio into overlapping chunks to avoid tail loss."""
         sample_rate = 16000
@@ -277,17 +340,30 @@ class TranscriptionPipeline:
         if total <= chunk_samples:
             return [audio]
 
-        chunks: list[np.ndarray] = []
-        start = 0
-        while start < total:
-            end = min(start + chunk_samples, total)
+        # Compute raw split boundaries then snap to silence.
+        boundaries: list[int] = []
+        pos = 0
+        while pos < total:
+            end = min(pos + chunk_samples, total)
             remaining = total - end
             if 0 < remaining < min_final_chunk_samples:
                 end = total
+            if end < total:
+                end = TranscriptionPipeline._find_best_split_point(
+                    audio, end, window_samples=8000
+                )
+            boundaries.append(end)
+            if end >= total:
+                break
+            pos += stride
+
+        chunks: list[np.ndarray] = []
+        start = 0
+        for end in boundaries:
             chunks.append(audio[start:end])
             if end >= total:
                 break
-            start += stride
+            start = max(end - overlap_samples, start + 1)
         return chunks
 
     @classmethod
@@ -361,6 +437,15 @@ class TranscriptionPipeline:
         for size in range(upper, _MIN_OVERLAP_WORDS - 1, -1):
             if left[-size:] == right[:size]:
                 return size
+        # Fuzzy match: allow ~16% mismatch (1 in 6 words) to handle
+        # minor Whisper transcription differences at chunk boundaries.
+        for size in range(upper, max(_MIN_OVERLAP_WORDS, 6) - 1, -1):
+            l_slice = left[-size:]
+            r_slice = right[:size]
+            allowed = size // 6
+            mismatches = sum(1 for a, b in zip(l_slice, r_slice) if a != b)
+            if mismatches <= allowed:
+                return size
         return 0
 
     @classmethod
@@ -418,11 +503,22 @@ class TranscriptionPipeline:
 
         return trimmed, True
 
+    def _has_speech(self, audio: np.ndarray, threshold: float = 0.5) -> bool:
+        """Check whether any 512-sample chunk exceeds the VAD speech threshold."""
+        chunk_size = 512
+        for i in range(0, len(audio) - chunk_size + 1, chunk_size):
+            prob = self._vad.speech_probability(audio[i : i + chunk_size])
+            if prob > threshold:
+                return True
+        return False
+
     def _should_refine(self, text: str, raw_text: str | None = None) -> bool:
         """Heuristic gate to avoid unnecessary LLM calls and reduce latency."""
         stripped = text.strip()
         word_count = len(text.split())
         if word_count < 4:
+            return False
+        if word_count >= 60:
             return False
         # Keep dictated questions literal; avoid instruct models hallucinating answers.
         if stripped.endswith("?") or _QUESTION_START_RE.match(stripped):
@@ -491,7 +587,12 @@ class TranscriptionPipeline:
             return cleaned
         if cleaned_words >= int(raw_words * 0.78):
             return cleaned
-        if not _ORPHAN_END_RE.search(cleaned.strip()):
+        # Trigger conservative fallback on severe truncation (>45% word loss)
+        # regardless of ending pattern, or on moderate truncation with orphan
+        # conjunction ending.
+        severe_drop = cleaned_words < int(raw_words * 0.55)
+        orphan_end = bool(_ORPHAN_END_RE.search(cleaned.strip()))
+        if not severe_drop and not orphan_end:
             return cleaned
 
         conservative = self.cleaner.clean_conservative(

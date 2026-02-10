@@ -243,6 +243,14 @@ class VoiceFlowApp(rumps.App):
             self.overlay.hide()
             return
 
+        rms = float(np.sqrt(np.mean(np.square(audio))))
+        if rms < 0.003:
+            log.info("Audio is silence (rms=%.6f); discarding", rms)
+            self._set_title("VF")
+            self._set_status("Ready")
+            self.overlay.hide()
+            return
+
         log.info(
             "Recording stopped; captured %d samples (%.1fs), capture_stop_ms=%.1f",
             audio.size,

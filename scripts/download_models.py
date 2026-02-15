@@ -29,16 +29,16 @@ log = logging.getLogger(__name__)
 
 MODEL_SPECS = [
     {
-        "repo_id": "mlx-community/whisper-large-v3-turbo",
-        "revision": "beea265c324f07ba1e347f3c8a97aec454056a86",
+        "repo_id": "mlx-community/parakeet-tdt-0.6b-v3",
+        "revision": "ed2b7e8c15f9aaa0b5772e2efb986255eaef7e15",
     },
     {
-        "repo_id": "mlx-community/whisper-large-v3-mlx",
-        "revision": "06cacdcc84198b112b7c83224f816c6c7aa4a4a9",
+        "repo_id": "mlx-community/parakeet-tdt-0.6b-v2",
+        "revision": "8ae155301e23d820d82aa60d24817c900e69e487",
     },
     {
-        "repo_id": "mlx-community/Qwen2.5-3B-Instruct-4bit",
-        "revision": "4f83f8f146fdf28b512a06562b671d7af4fab457",
+        "repo_id": "mlx-community/Qwen2.5-0.5B-Instruct-4bit",
+        "revision": "a5339a4131f135d0fdc6a5c8b5bbed2753bbe0f3",
     },
 ]
 
@@ -128,7 +128,7 @@ def main() -> None:
     parser.add_argument(
         "--skip-max-accuracy",
         action="store_true",
-        help="Skip the large whisper-large-v3 model (saves ~3GB)",
+        help="Skip the secondary Parakeet model (saves ~650MB)",
     )
     args = parser.parse_args()
     download_all(include_max_accuracy=not args.skip_max_accuracy)

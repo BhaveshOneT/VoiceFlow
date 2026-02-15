@@ -1,10 +1,11 @@
-"""Transcription pipeline: Whisper -> Cleanup -> Output."""
+"""Transcription pipeline: STT -> Cleanup -> Output."""
 from __future__ import annotations
 
 import logging
 import os
 import re
 import time
+from pathlib import Path
 from typing import Optional
 
 import numpy as np
@@ -28,6 +29,20 @@ _CORRECTION_CUE_RE = re.compile(
     r"never mind|let me rephrase|correction|rather)\b",
     re.IGNORECASE,
 )
+_FILE_TOKEN_RE = re.compile(r"@?[A-Za-z0-9][A-Za-z0-9_./-]*\.[A-Za-z0-9]{1,6}\b")
+_BARE_FILE_TAG_SENTENCE_RE = re.compile(
+    r"^\s*@[\w./-]+(?:\s+@[\w./-]+)*[.!?]?\s*$",
+    re.IGNORECASE,
+)
+_SINGLE_TARGET_ACTION_RE = re.compile(
+    r"\b(update|modify|fix|refactor|edit|open|check|test|use|call)\b",
+    re.IGNORECASE,
+)
+_MULTI_TARGET_ACTION_RE = re.compile(r"\b(rename|move|copy)\b", re.IGNORECASE)
+_TO_FILE_RE = re.compile(
+    r"\bto\s+@?[A-Za-z0-9][A-Za-z0-9_./-]*\.[A-Za-z0-9]{1,6}\b",
+    re.IGNORECASE,
+)
 _COMPLEX_TEXT_RE = re.compile(r"[,:;]|(?:\b(and|but|because|then)\b)", re.IGNORECASE)
 _FILLER_CUE_RE = re.compile(
     r"\b(um+|uh+|hmm+|hm+|you know|sort of|kind of|basically|literally)\b",
@@ -46,6 +61,7 @@ _ORPHAN_END_RE = re.compile(
     r"although|however|therefore)$",
     re.IGNORECASE,
 )
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
 _SENTENCE_END_RE = re.compile(r"[.!?]")
 _TRIM_FRAME_SAMPLES = 320  # 20 ms at 16 kHz
 _TRIM_PADDING_SAMPLES = 3520  # 220 ms safety pad around speech
@@ -61,6 +77,7 @@ _WORD_TOKEN_RE = re.compile(r"[A-Za-z0-9_']+")
 _TOKEN_SPLIT_RE = re.compile(r"\S+")
 _MIN_OVERLAP_WORDS = 4
 _MAX_OVERLAP_WORDS = 20
+_WHISPER_SAFE_FALLBACK_MODEL = "mlx-community/whisper-large-v3-turbo"
 
 _HALLUCINATION_PATTERNS = [
     re.compile(r"^thank you\.?$", re.IGNORECASE),
@@ -99,7 +116,7 @@ class TranscriptionPipeline:
     """Coordinates the full transcription pipeline.
 
     Stages:
-        1. Whisper STT (with tech vocabulary bias via initial_prompt)
+        1. STT transcription (Parakeet by default, Whisper-compatible)
         2. Regex cleanup + dictionary term replacement  (always, <5 ms)
         3. LLM refinement  (standard & max_accuracy modes only)
     """
@@ -109,13 +126,13 @@ class TranscriptionPipeline:
         self.dictionary = dictionary
         self.transcription_mode = config.transcription_mode
 
-        # Select whisper model based on cleanup mode
-        whisper_model = config.whisper_model
+        # Select STT model based on cleanup mode.
+        stt_model = config.stt_model
         if config.cleanup_mode == "max_accuracy":
-            whisper_model = config.max_accuracy_whisper_model
+            stt_model = config.max_accuracy_stt_model
 
-        self.whisper = WhisperEngine(
-            model_name=whisper_model,
+        self.stt = WhisperEngine(
+            model_name=stt_model,
             language=config.language,
         )
         self.cleaner = TextCleaner
@@ -124,6 +141,15 @@ class TranscriptionPipeline:
         # Load LLM refiner for standard and max_accuracy modes
         if config.cleanup_mode != "fast":
             self.refiner = TextRefiner(model_name=config.llm_model)
+
+    @property
+    def whisper(self) -> WhisperEngine:
+        """Backward-compatible alias for older call sites."""
+        return self.stt
+
+    @whisper.setter
+    def whisper(self, engine: WhisperEngine) -> None:
+        self.stt = engine
 
     def process(self, audio: np.ndarray) -> str:
         """Run the full pipeline on audio data. Returns cleaned text."""
@@ -134,20 +160,20 @@ class TranscriptionPipeline:
         decode_samples = int(audio.size)
         programmer_mode = self._programmer_mode_enabled()
 
-        # 1. Whisper transcription
+        # 1. STT transcription
         stt_started = time.perf_counter()
-        tech_context = self.dictionary.get_whisper_context() if programmer_mode else ""
+        tech_context = self.dictionary.get_stt_context() if programmer_mode else ""
         raw = self._transcribe_adaptive(audio, tech_context=tech_context)
         stt_ms = (time.perf_counter() - stt_started) * 1000.0
         _log_transcript("Raw transcription", raw)
 
-        # Hallucination blocklist -- discard common Whisper silence hallucinations
+        # Hallucination blocklist -- discard common silence hallucinations
         raw_stripped = raw.strip()
         if any(pat.match(raw_stripped) for pat in _HALLUCINATION_PATTERNS):
             log.info("Hallucination blocklist matched; discarding output")
             return ""
 
-        # Prompt echo detection -- discard if Whisper echoes the prompt
+        # Prompt echo detection -- discard if model echoes the prompt
         raw_lower = raw_stripped.lower()
         if len(raw_stripped.split()) < 15:
             if any(frag in raw_lower for frag in _PROMPT_ECHO_FRAGMENTS):
@@ -201,6 +227,14 @@ class TranscriptionPipeline:
                             "(source_words=%d, refined_words=%d)",
                             len(pre_refine.split()),
                             len(refined.split()),
+                        )
+                    elif self._is_suspicious_refinement(
+                        source=pre_refine,
+                        candidate=refined,
+                        programmer_mode=programmer_mode,
+                    ):
+                        log.warning(
+                            "Rejected LLM refinement due to intent drift in file targeting"
                         )
                     else:
                         cleaned = refined
@@ -554,6 +588,43 @@ class TranscriptionPipeline:
             return True
         return False
 
+    @staticmethod
+    def _extract_file_tokens(text: str) -> set[str]:
+        return {
+            match.group(0).lstrip("@").lower()
+            for match in _FILE_TOKEN_RE.finditer(text)
+        }
+
+    @staticmethod
+    def _has_orphan_file_tag_sentence(text: str) -> bool:
+        sentences = [s.strip() for s in _SENTENCE_SPLIT_RE.split(text.strip()) if s.strip()]
+        return any(_BARE_FILE_TAG_SENTENCE_RE.match(sentence) for sentence in sentences)
+
+    @classmethod
+    def _is_suspicious_refinement(
+        cls,
+        source: str,
+        candidate: str,
+        programmer_mode: bool,
+    ) -> bool:
+        if not programmer_mode:
+            return False
+        if cls._has_orphan_file_tag_sentence(candidate):
+            return True
+
+        source_files = cls._extract_file_tokens(source)
+        candidate_files = cls._extract_file_tokens(candidate)
+        if len(source_files) == 1 and len(candidate_files) > 1:
+            return True
+
+        if not _CORRECTION_CUE_RE.search(source):
+            return False
+        if not _SINGLE_TARGET_ACTION_RE.search(source):
+            return False
+        if _MULTI_TARGET_ACTION_RE.search(source) or _TO_FILE_RE.search(source):
+            return False
+        return len(candidate_files) > 1
+
     def _preserve_completeness(
         self,
         raw: str,
@@ -595,57 +666,131 @@ class TranscriptionPipeline:
             return conservative
         return cleaned
 
-    def _transcribe_with_fallback(self, audio: np.ndarray, tech_context: str) -> str:
-        """Transcribe audio and fall back to turbo model if max-accuracy model fails."""
-        primary_error: Exception | None = None
-        try:
-            return self.whisper.transcribe(audio, tech_context=tech_context)
-        except Exception as exc:
-            primary_error = exc
-            log.exception(
-                "Primary Whisper transcription failed with model %s",
-                self.whisper.model_name,
-            )
+    @staticmethod
+    def _adaptive_temperature(audio: np.ndarray) -> float | tuple[float, ...]:
+        """Choose temperature schedule based on audio duration.
 
-        fallback_model = self.config.whisper_model
-        if self.whisper.model_name == fallback_model:
-            raise RuntimeError(
-                f"Whisper transcription failed with model '{self.whisper.model_name}'"
-            ) from primary_error
+        Short clips rarely trigger compression ratio issues, so skip the
+        retry machinery for lower latency.
+        """
+        duration_s = audio.size / 16000.0
+        if duration_s < 15.0:
+            return 0.0  # single float, no retries
+        if duration_s < 45.0:
+            return (0.0, 0.2)  # one fallback level
+        return (0.0, 0.2, 0.4)  # full fallback for long recordings
 
-        log.warning(
-            "Retrying transcription with fallback model %s", fallback_model
+    @staticmethod
+    def _dedupe_models(models: list[str]) -> list[str]:
+        unique: list[str] = []
+        seen: set[str] = set()
+        for model in models:
+            normalized = str(model).strip()
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            unique.append(normalized)
+        return unique
+
+    @staticmethod
+    def _is_stt_model_cached(model_name: str) -> bool:
+        """Check whether a Hugging Face model snapshot is already available locally."""
+        normalized = str(model_name).strip()
+        if "/" not in normalized:
+            return False
+        cache_dir = (
+            Path.home()
+            / ".cache"
+            / "huggingface"
+            / "hub"
+            / f"models--{normalized.replace('/', '--')}"
+            / "snapshots"
         )
-        fallback_engine = WhisperEngine(
-            model_name=fallback_model,
-            language=self.config.language,
+        if not cache_dir.exists():
+            return False
+        return any(path.is_file() for path in cache_dir.glob("*/config.json"))
+
+    def _stt_fallback_models(self, *, for_warm_up: bool = False) -> list[str]:
+        """Return model candidates ordered from fastest recovery to broadest fallback."""
+        primary_model = self.config.stt_model
+        max_accuracy_model = self.config.max_accuracy_stt_model
+        active_model = self.stt.model_name
+
+        models: list[str]
+        max_mode_uncached = (
+            for_warm_up
+            and self.config.cleanup_mode == "max_accuracy"
+            and active_model == max_accuracy_model
+            and not self._is_stt_model_cached(max_accuracy_model)
+            and self._is_stt_model_cached(primary_model)
         )
-        try:
-            fallback_engine.warm_up()
-            raw = fallback_engine.transcribe(audio, tech_context=tech_context)
-            self.whisper = fallback_engine
+        if max_mode_uncached:
             log.warning(
-                "Fallback transcription succeeded; switched active model to %s",
-                fallback_model,
+                "Max-accuracy STT model %s is not cached locally; "
+                "starting with primary model %s for faster startup",
+                max_accuracy_model,
+                primary_model,
             )
-            return raw
-        except Exception as fallback_error:
-            raise RuntimeError(
-                f"Whisper transcription failed on primary model "
-                f"'{self.config.max_accuracy_whisper_model}' and fallback "
-                f"'{fallback_model}'"
-            ) from fallback_error
+            models = [primary_model, active_model, max_accuracy_model]
+        else:
+            models = [active_model, primary_model, max_accuracy_model]
+
+        # Final compatibility fallback if Parakeet loading is unavailable.
+        models.append(_WHISPER_SAFE_FALLBACK_MODEL)
+        return self._dedupe_models(models)
+
+    def _transcribe_with_fallback(self, audio: np.ndarray, tech_context: str) -> str:
+        """Transcribe audio and recover across multiple STT model candidates."""
+        temperature = self._adaptive_temperature(audio)
+        errors: list[tuple[str, Exception]] = []
+        candidates = self._stt_fallback_models()
+        for index, model_name in enumerate(candidates):
+            if index == 0 and self.stt.model_name == model_name:
+                engine = self.stt
+            else:
+                engine = WhisperEngine(
+                    model_name=model_name,
+                    language=self.config.language,
+                )
+            try:
+                if engine is not self.stt:
+                    engine.warm_up()
+                raw = engine.transcribe(
+                    audio,
+                    tech_context=tech_context,
+                    temperature=temperature,
+                )
+                if engine is not self.stt:
+                    self.stt = engine
+                    log.warning(
+                        "Recovered STT transcription with fallback model %s",
+                        model_name,
+                    )
+                return raw
+            except Exception as exc:
+                errors.append((model_name, exc))
+                log.exception(
+                    "STT transcription failed with model %s",
+                    model_name,
+                )
+
+        summary = ", ".join(
+            f"{model}: {type(exc).__name__}" for model, exc in errors
+        )
+        raise RuntimeError(
+            f"STT transcription failed across fallback candidates ({summary})"
+        ) from errors[-1][1]
 
     def warm_up(self) -> None:
         """Load and warm up all models."""
-        self._warm_up_whisper_with_fallback()
+        self._warm_up_stt_with_fallback()
         if self.refiner:
             self.refiner.load()
             log.info("LLM loaded and ready")
 
     def warm_up_for_realtime(self) -> None:
-        """Warm up only the critical real-time path (Whisper)."""
-        self._warm_up_whisper_with_fallback()
+        """Warm up only the critical real-time path (STT)."""
+        self._warm_up_stt_with_fallback()
 
     def warm_up_refiner(self) -> None:
         """Warm up optional LLM refiner (can run in background)."""
@@ -653,60 +798,59 @@ class TranscriptionPipeline:
             self.refiner.load()
             log.info("LLM loaded and ready")
 
-    def _warm_up_whisper_with_fallback(self) -> None:
-        """Warm up the active Whisper model and fall back when max-accuracy is unavailable."""
-        primary_error: Exception | None = None
-        try:
-            self.whisper.warm_up()
-            return
-        except Exception as exc:
-            primary_error = exc
-            log.exception(
-                "Whisper warm-up failed for model %s", self.whisper.model_name
-            )
+    def _warm_up_stt_with_fallback(self) -> None:
+        """Warm up active STT model and recover using ordered fallback candidates."""
+        errors: list[tuple[str, Exception]] = []
+        candidates = self._stt_fallback_models(for_warm_up=True)
+        for index, model_name in enumerate(candidates):
+            if index == 0 and self.stt.model_name == model_name:
+                engine = self.stt
+            else:
+                engine = WhisperEngine(
+                    model_name=model_name,
+                    language=self.config.language,
+                )
+            try:
+                engine.warm_up()
+                if engine is not self.stt:
+                    self.stt = engine
+                    log.warning(
+                        "Warm-up recovered using fallback STT model %s",
+                        model_name,
+                    )
+                return
+            except Exception as exc:
+                errors.append((model_name, exc))
+                log.exception(
+                    "STT warm-up failed for model %s",
+                    model_name,
+                )
 
-        fallback_model = self.config.whisper_model
-        if self.whisper.model_name == fallback_model:
-            raise RuntimeError(
-                f"Whisper warm-up failed for model '{self.whisper.model_name}'"
-            ) from primary_error
-
-        log.warning("Retrying warm-up with fallback model %s", fallback_model)
-        fallback_engine = WhisperEngine(
-            model_name=fallback_model,
-            language=self.config.language,
+        summary = ", ".join(
+            f"{model}: {type(exc).__name__}" for model, exc in errors
         )
-        try:
-            fallback_engine.warm_up()
-            self.whisper = fallback_engine
-            log.warning(
-                "Warm-up fallback succeeded; using model %s", fallback_model
-            )
-        except Exception as fallback_error:
-            raise RuntimeError(
-                f"Whisper warm-up failed on primary model "
-                f"'{self.config.max_accuracy_whisper_model}' and fallback "
-                f"'{fallback_model}'"
-            ) from fallback_error
+        raise RuntimeError(
+            f"STT warm-up failed across fallback candidates ({summary})"
+        ) from errors[-1][1]
 
     def set_cleanup_mode(self, mode: str) -> None:
         """Switch cleanup mode at runtime."""
         old_mode = self.config.cleanup_mode
         self.config.cleanup_mode = mode
 
-        # Reload Whisper model when switching to/from max_accuracy
+        # Reload STT model when switching to/from max_accuracy
         if (old_mode == "max_accuracy") != (mode == "max_accuracy"):
             new_model = (
-                self.config.max_accuracy_whisper_model
+                self.config.max_accuracy_stt_model
                 if mode == "max_accuracy"
-                else self.config.whisper_model
+                else self.config.stt_model
             )
-            log.info("Switching Whisper model to %s", new_model)
-            self.whisper = WhisperEngine(
+            log.info("Switching STT model to %s", new_model)
+            self.stt = WhisperEngine(
                 model_name=new_model,
                 language=self.config.language,
             )
-            self._warm_up_whisper_with_fallback()
+            self._warm_up_stt_with_fallback()
 
         # Handle LLM refiner
         if mode == "fast" and self.refiner:
@@ -716,6 +860,10 @@ class TranscriptionPipeline:
         elif mode != "fast" and not self.refiner:
             self.refiner = TextRefiner(model_name=self.config.llm_model)
             self.refiner.load()
+
+    def _warm_up_whisper_with_fallback(self) -> None:
+        """Backward-compatible alias for old method name."""
+        self._warm_up_stt_with_fallback()
 
     def set_transcription_mode(self, mode: str) -> None:
         """Switch between normal and programmer transcription behavior."""
@@ -735,4 +883,4 @@ class TranscriptionPipeline:
         - "de": force German
         """
         self.config.language = language
-        self.whisper.set_language(language)
+        self.stt.set_language(language)

@@ -10,14 +10,21 @@ log = logging.getLogger(__name__)
 APP_SUPPORT_DIR = Path.home() / "Library" / "Application Support" / "VoiceFlow"
 CONFIG_PATH = APP_SUPPORT_DIR / "config.json"
 
-DEFAULT_WHISPER_MODEL = "mlx-community/whisper-large-v3-turbo"
-DEFAULT_MAX_ACCURACY_MODEL = "mlx-community/whisper-large-v3-mlx"
-DEFAULT_LLM_MODEL = "mlx-community/Qwen2.5-3B-Instruct-4bit"
+DEFAULT_WHISPER_MODEL = "mlx-community/parakeet-tdt-0.6b-v3"
+DEFAULT_MAX_ACCURACY_MODEL = "mlx-community/parakeet-tdt-0.6b-v2"
+DEFAULT_LLM_MODEL = "mlx-community/Qwen2.5-0.5B-Instruct-4bit"
 DEFAULT_LANGUAGE = "auto"
 _INVALID_MODEL_ALIASES = {
-    "mlx-community/whisper-large-v3",
+    "",
+}
+_STT_MODEL_ALIASES = {
+    "mlx-community/whisper-large-v3": DEFAULT_WHISPER_MODEL,
+    "mlx-community/whisper-large-v3-turbo": DEFAULT_WHISPER_MODEL,
+    "mlx-community/whisper-large-v3-mlx": DEFAULT_MAX_ACCURACY_MODEL,
 }
 _LLM_MODEL_ALIASES = {
+    "mlx-community/Qwen2.5-3B-Instruct-4bit": DEFAULT_LLM_MODEL,
+    "mlx-community/Qwen2.5-1.5B-Instruct-4bit": DEFAULT_LLM_MODEL,
     # Requested 4B Minitron variants are not published on MLX; map to stable <4B.
     "mlx-community/Mistral-NeMo-Minitron-4B-Instruct": DEFAULT_LLM_MODEL,
     "mlx-community/Mistral-NeMo-Minitron-4B-Instruct-4bit": DEFAULT_LLM_MODEL,
@@ -80,15 +87,35 @@ class AppConfig:
     dictionary_path: str = ""
     max_accuracy_whisper_model: str = DEFAULT_MAX_ACCURACY_MODEL
 
+    # Onboarding
+    onboarding_complete: bool = False
+
+    # Meeting settings
+    default_audio_device: int = -1  # -1 = system default
+    auto_transcribe_on_stop: bool = True
+    auto_summarize: bool = True
+    summary_provider: str = "local"  # "local" or "openai"
+    meeting_transcription_provider: str = "local"  # "local" or "openai"
+    openai_api_key: str = ""
+    pyannote_auth_token: str = ""
+
     def __post_init__(self) -> None:
         if not self.dictionary_path:
             self.dictionary_path = str(APP_SUPPORT_DIR / "dictionary.json")
-        if not self.whisper_model or self.whisper_model in _INVALID_MODEL_ALIASES:
+        if not self.whisper_model:
+            self.whisper_model = DEFAULT_WHISPER_MODEL
+        self.whisper_model = _STT_MODEL_ALIASES.get(self.whisper_model, self.whisper_model)
+        if self.whisper_model in _INVALID_MODEL_ALIASES:
             self.whisper_model = DEFAULT_WHISPER_MODEL
         if (
             not self.max_accuracy_whisper_model
-            or self.max_accuracy_whisper_model in _INVALID_MODEL_ALIASES
         ):
+            self.max_accuracy_whisper_model = DEFAULT_MAX_ACCURACY_MODEL
+        self.max_accuracy_whisper_model = _STT_MODEL_ALIASES.get(
+            self.max_accuracy_whisper_model,
+            self.max_accuracy_whisper_model,
+        )
+        if self.max_accuracy_whisper_model in _INVALID_MODEL_ALIASES:
             self.max_accuracy_whisper_model = DEFAULT_MAX_ACCURACY_MODEL
         self.language = _LANGUAGE_ALIASES.get(
             str(self.language).strip().lower(), DEFAULT_LANGUAGE
@@ -112,6 +139,24 @@ class AppConfig:
             self.llm_model = DEFAULT_LLM_MODEL
         self.llm_model = _LLM_MODEL_ALIASES.get(self.llm_model, self.llm_model)
 
+    @property
+    def stt_model(self) -> str:
+        """Preferred name for the primary local speech-to-text model."""
+        return self.whisper_model
+
+    @stt_model.setter
+    def stt_model(self, value: str) -> None:
+        self.whisper_model = value
+
+    @property
+    def max_accuracy_stt_model(self) -> str:
+        """Preferred name for the max-accuracy local speech-to-text model."""
+        return self.max_accuracy_whisper_model
+
+    @max_accuracy_stt_model.setter
+    def max_accuracy_stt_model(self, value: str) -> None:
+        self.max_accuracy_whisper_model = value
+
     @classmethod
     def load(cls) -> AppConfig:
         APP_SUPPORT_DIR.mkdir(parents=True, exist_ok=True)
@@ -120,6 +165,9 @@ class AppConfig:
                 data = json.loads(CONFIG_PATH.read_text())
                 known_fields = {f.name for f in cls.__dataclass_fields__.values()}
                 filtered = {k: v for k, v in data.items() if k in known_fields}
+                # Migration: existing users (config exists) skip onboarding
+                if "onboarding_complete" not in data:
+                    filtered["onboarding_complete"] = True
                 config = cls(**filtered)
                 # Persist automatic migrations (e.g., deprecated model IDs).
                 if (

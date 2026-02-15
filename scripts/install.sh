@@ -4,7 +4,7 @@
 #
 # Usage:
 #   ./scripts/install.sh            # Full install (all models)
-#   ./scripts/install.sh --light    # Skip max_accuracy whisper model (~3GB smaller)
+#   ./scripts/install.sh --light    # Skip secondary Parakeet model (~650MB smaller)
 #
 set -euo pipefail
 
@@ -87,7 +87,7 @@ success "Dependencies installed"
 DOWNLOAD_FLAGS=""
 if [[ "${1:-}" == "--light" ]]; then
     DOWNLOAD_FLAGS="--skip-max-accuracy"
-    info "Light mode: skipping max_accuracy whisper model"
+    info "Light mode: skipping secondary Parakeet model"
 fi
 
 info "Downloading AI models (this may take a while on first run)..."

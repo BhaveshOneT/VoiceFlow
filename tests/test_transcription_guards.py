@@ -118,6 +118,28 @@ class PipelineRefinementGateTests(unittest.TestCase):
             self.pipeline._is_suspiciously_short_refinement(source, candidate)
         )
 
+    def test_suspicious_refinement_rejects_orphan_file_tag_sentence(self) -> None:
+        source = "I want to update @selector.py."
+        candidate = "Update @functions.py. @selector.py."
+        self.assertTrue(
+            self.pipeline._is_suspicious_refinement(
+                source=source,
+                candidate=candidate,
+                programmer_mode=True,
+            )
+        )
+
+    def test_suspicious_refinement_rejects_extra_file_target(self) -> None:
+        source = "Please update @selector.py."
+        candidate = "Please update @functions.py and @selector.py."
+        self.assertTrue(
+            self.pipeline._is_suspicious_refinement(
+                source=source,
+                candidate=candidate,
+                programmer_mode=True,
+            )
+        )
+
     def test_preserve_completeness_uses_conservative_fallback(self) -> None:
         raw = (
             "we are setting things up and it is good to go but we still need to check "
@@ -215,6 +237,35 @@ class PipelineRefinementGateTests(unittest.TestCase):
         ):
             result = pipeline.process(audio)
         self.assertIn("@function.py", result.lower())
+
+    def test_process_rejects_malformed_file_refinement(self) -> None:
+        config = AppConfig(cleanup_mode="standard", transcription_mode="programmer")
+        pipeline = TranscriptionPipeline(config=config, dictionary=Dictionary())
+        audio = np.ones(16000, dtype=np.float32)
+
+        class _FakeRefiner:
+            loaded = True
+
+            @staticmethod
+            def refine(_text: str, _vocab: dict[str, str]) -> str:
+                return "Update @functions.py. @selector.py."
+
+        pipeline.refiner = _FakeRefiner()
+        with mock.patch.object(
+            pipeline,
+            "_trim_silence_for_decode",
+            return_value=(audio, False),
+        ), mock.patch.object(
+            pipeline,
+            "_transcribe_adaptive",
+            return_value=(
+                "like i want to update the functions.py file and then say no sorry. "
+                "i want to update selector.py file"
+            ),
+        ):
+            result = pipeline.process(audio)
+        self.assertIn("@selector.py", result.lower())
+        self.assertNotIn("functions.py", result.lower())
 
     def test_adaptive_transcribe_merges_chunks(self) -> None:
         config = AppConfig(cleanup_mode="fast")
@@ -332,6 +383,21 @@ class TextCleanerBehaviorTests(unittest.TestCase):
         self.assertIn("i want to modify", cleaned.lower())
         self.assertIn("@text_refiner", cleaned.lower())
         self.assertNotIn("@functions", cleaned.lower())
+
+    def test_no_sorry_sentence_boundary_replaces_previous_file_target(self) -> None:
+        text = (
+            "like i want to update the functions.py file and then say no sorry. "
+            "i want to update selector.py file"
+        )
+        cleaned = TextCleaner.clean(text).lower()
+        self.assertIn("@selector.py", cleaned)
+        self.assertNotIn("functions.py", cleaned)
+
+    def test_no_sorry_standalone_sentence_replaces_prior_sentence(self) -> None:
+        text = "i want to update functions.py file. no sorry. i want to update selector.py file."
+        cleaned = TextCleaner.clean(text).lower()
+        self.assertIn("@selector.py", cleaned)
+        self.assertNotIn("functions.py", cleaned)
 
     def test_tags_explicit_and_spoken_file_names(self) -> None:
         explicit = TextCleaner.clean("please update function.py file")

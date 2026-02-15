@@ -40,12 +40,13 @@ class AudioCapture:
             self._recent_rms.append(rms)
         self.queue.put(chunk)
 
-    def start(self) -> None:
+    def start(self, device_id: int | None = None) -> None:
         self._stream = sd.InputStream(
             samplerate=self.sample_rate,
             blocksize=self.block_size,
             channels=1,
             dtype="float32",
+            device=device_id,
             callback=self._callback,
         )
         self._stream.start()

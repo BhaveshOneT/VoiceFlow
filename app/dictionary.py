@@ -74,7 +74,7 @@ class Dictionary:
     def get_all_terms(self) -> dict[str, str]:
         return {**self.terms, **self.auto_learned}
 
-    def get_whisper_context(self) -> str:
+    def get_stt_context(self) -> str:
         unique_values = list(dict.fromkeys(self.get_all_terms().values()))
         top_terms = unique_values[:20]
         if not top_terms:
@@ -85,3 +85,7 @@ class Dictionary:
         if second_half:
             context += f" The project also uses {', '.join(second_half)}."
         return context
+
+    def get_whisper_context(self) -> str:
+        """Backward-compatible alias for legacy call sites."""
+        return self.get_stt_context()

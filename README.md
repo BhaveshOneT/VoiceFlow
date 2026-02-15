@@ -5,8 +5,8 @@ Hold `Right Cmd`, speak, release, and VoiceFlow inserts cleaned text into the fo
 
 ## What It Does
 
-- Real-time speech-to-text with local Whisper (`mlx-whisper`)
-- Smart post-processing with local LLM (`Qwen2.5-3B-4bit`)
+- Real-time speech-to-text with local Parakeet (`parakeet-mlx`)
+- Smart post-processing with local LLM (`Qwen2.5-0.5B-4bit`)
 - Two transcription modes:
   - `Programmer Mode` (code-aware terms, file tagging)
   - `Normal Mode` (clean dictation without code-specific tagging)

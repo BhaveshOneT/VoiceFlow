@@ -33,7 +33,7 @@ all_datas = []
 all_binaries = []
 all_hiddenimports = []
 
-for pkg in ["mlx", "mlx_lm", "mlx_whisper", "transformers"]:
+for pkg in ["mlx", "mlx_lm", "mlx_whisper", "parakeet_mlx", "transformers", "PySide6"]:
     datas, binaries, hiddenimports = collect_all(pkg)
     all_datas += datas
     all_binaries += binaries
@@ -65,8 +65,10 @@ a = Analysis(
         "ApplicationServices",
         "CoreFoundation",
         "sounddevice",
-        "rumps",
         "certifi",
+        "PySide6.QtCore",
+        "PySide6.QtGui",
+        "PySide6.QtWidgets",
     ] + all_hiddenimports,
     hookspath=[],
     hooksconfig={},
@@ -116,7 +118,7 @@ app = BUNDLE(
         "CFBundleShortVersionString": "1.0.0",
         "CFBundleIconFile": "voiceflow.icns",
         "LSMinimumSystemVersion": "13.0",
-        "LSUIElement": True,
+        "LSUIElement": False,
         "NSMicrophoneUsageDescription": (
             "VoiceFlow needs microphone access to capture your speech for "
             "local AI transcription."

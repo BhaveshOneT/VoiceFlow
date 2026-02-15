@@ -69,6 +69,12 @@ class HotkeyListener:
         self._local_monitor = None
         self._lock = threading.Lock()
 
+        # Debounce: PySide6's Qt event loop can generate duplicate
+        # NSFlagsChanged events for the same physical key action.
+        self._last_event_ts: float = 0.0
+        _DEBOUNCE_S = 0.05  # 50ms -- same physical key can't fire faster
+        self._debounce_s = _DEBOUNCE_S
+
         # Push-to-talk state
         self._key_held = False
         self._press_time: float = 0.0
@@ -77,6 +83,28 @@ class HotkeyListener:
         # Toggle mode state
         self._last_press_time: float = 0.0
         self._toggle_armed = False
+
+    def update_key(self, key: str) -> None:
+        """Change the listened hotkey at runtime (safe from any thread).
+
+        Stops current monitors, updates internal key code + modifier flag,
+        then restarts monitors for the new key.
+        """
+        new_code = KEYCODE_MAP.get(key)
+        if new_code is None:
+            log.warning("Unknown hotkey %r; ignoring update_key()", key)
+            return
+        if new_code == self._key_code:
+            return  # no change
+
+        def _swap_on_main() -> None:
+            self._stop_monitors()
+            self._key_code = new_code
+            self._modifier_flag = _MODIFIER_FLAG_FOR_KEYCODE.get(new_code, 0)
+            self._start_monitors()
+            log.info("Hotkey updated to %s (keycode=0x%02X)", key, new_code)
+
+        AppHelper.callAfter(_swap_on_main)
 
     def start(self) -> None:
         """Start listening for hotkey events.
@@ -89,7 +117,10 @@ class HotkeyListener:
     def _start_on_main_thread(self) -> None:
         if self._global_monitor is not None:
             return
+        self._start_monitors()
 
+    def _start_monitors(self) -> None:
+        """Create NSEvent monitors (must be called on main thread)."""
         mask = AppKit.NSEventMaskFlagsChanged
 
         self._global_monitor = (
@@ -114,8 +145,8 @@ class HotkeyListener:
                 self._key_code,
             )
 
-    def stop(self) -> None:
-        """Stop listening and clean up."""
+    def _stop_monitors(self) -> None:
+        """Remove NSEvent monitors and reset state."""
         if self._global_monitor is not None:
             AppKit.NSEvent.removeMonitor_(self._global_monitor)
             self._global_monitor = None
@@ -126,6 +157,10 @@ class HotkeyListener:
             self._key_held = False
             self._recording = False
             self._toggle_armed = False
+
+    def stop(self) -> None:
+        """Stop listening and clean up."""
+        self._stop_monitors()
 
     @property
     def is_recording(self) -> bool:
@@ -146,6 +181,13 @@ class HotkeyListener:
         try:
             if event.keyCode() != self._key_code:
                 return
+
+            # Debounce: Qt may re-post the same NSFlagsChanged event,
+            # causing duplicate press/release callbacks.
+            now = time.monotonic()
+            if now - self._last_event_ts < self._debounce_s:
+                return
+            self._last_event_ts = now
 
             is_pressed = bool(event.modifierFlags() & self._modifier_flag)
 

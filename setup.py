@@ -27,7 +27,7 @@ OPTIONS = {
         "CFBundleVersion": "1.0.0",
         "CFBundleShortVersionString": "1.0.0",
         "LSMinimumSystemVersion": "13.0",
-        "LSUIElement": True,  # Menu bar app -- no dock icon
+        "LSUIElement": False,  # Windowed app with Dock icon
         "NSMicrophoneUsageDescription": (
             "VoiceFlow needs microphone access to capture your speech for "
             "local AI transcription."
@@ -47,6 +47,7 @@ OPTIONS = {
         "numpy",
         "pynput",
         "onnxruntime",
+        "parakeet_mlx",
         "mlx_whisper",
         "mlx_lm",
         "huggingface_hub",

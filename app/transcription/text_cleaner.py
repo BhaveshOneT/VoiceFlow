@@ -29,7 +29,7 @@ _LEADING_DISCOURSE = re.compile(
 )
 _SENTENCE_SPLIT = re.compile(r'(?<=[.!?])\s+')
 _CORRECTION_PREFIX = re.compile(
-    r'^\s*(?P<cue>no\s*,\s*no|no\s+no|sorry|rather|correction|'
+    r'^\s*(?P<cue>no\s*,\s*no|no\s+no|no\s*,?\s*sorry|sorry|rather|correction|'
     r'i mean|i meant|wait no|no wait|scratch that|never mind(?: that)?|'
     r'let me rephrase)\b[\s,:-]*',
     re.IGNORECASE,
@@ -37,8 +37,16 @@ _CORRECTION_PREFIX = re.compile(
 _INLINE_CORRECTION = re.compile(
     r'^(?P<prefix>.+?)\s*(?:,\s*|\s+)'
     r'(?P<cue>sorry|rather|i mean|i meant|no wait|wait no|no\s*,?\s*no|'
+    r'no\s*,?\s*sorry|'
     r'scratch that|never mind(?: that)?|let me rephrase)\b'
     r'[\s,:-]*(?P<replacement>.+)$',
+    re.IGNORECASE,
+)
+_TRAILING_CORRECTION = re.compile(
+    r'^(?:(?P<prefix>.+?)\s+)?'
+    r'(?P<cue>no\s*,?\s*no|no\s+no|no\s*,?\s*sorry|no\s+wait|wait\s+no|'
+    r'i\s+mean|i\s+meant|rather|correction|scratch\s+that|'
+    r'never\s+mind(?:\s+that)?|let\s+me\s+rephrase)\s*[.!?]*$',
     re.IGNORECASE,
 )
 _VERB_TARGET_OF_APP = re.compile(
@@ -267,6 +275,7 @@ _EMBEDDED_SHOULD_QUESTION_RE = re.compile(
 )
 _STRONG_REPLACE_CUES = {
     "no no",
+    "no sorry",
     "no wait",
     "wait no",
     "i mean",
@@ -363,35 +372,60 @@ class TextCleaner:
     @classmethod
     def _apply_self_corrections(cls, text: str) -> str:
         """Rewrite explicit backtracks such as 'no, no, X' using prior context."""
-        sentences = _SENTENCE_SPLIT.split(text.strip())
+        sentences = [s.strip() for s in _SENTENCE_SPLIT.split(text.strip()) if s.strip()]
         out: list[str] = []
-        for sentence in sentences:
-            sentence = sentence.strip()
-            if not sentence:
+        idx = 0
+        while idx < len(sentences):
+            sentence = sentences[idx]
+            trailing = _TRAILING_CORRECTION.match(sentence)
+            if trailing:
+                cue = cls._normalize_cue(trailing.group("cue"))
+                prefix = (trailing.group("prefix") or "").strip(" ,.-")
+                next_sentence = sentences[idx + 1] if idx + 1 < len(sentences) else ""
+                if next_sentence:
+                    if prefix and cls._should_replace_previous(cue, prefix, next_sentence):
+                        out.append(cls._merge_with_previous(prefix, next_sentence))
+                        idx += 2
+                        continue
+                    if not prefix and out and cls._should_replace_previous(cue, out[-1], next_sentence):
+                        out[-1] = cls._merge_with_previous(out[-1], next_sentence)
+                        idx += 2
+                        continue
+                if prefix:
+                    out.append(cls._ensure_terminal_punctuation(prefix))
+                idx += 1
                 continue
             inline = _INLINE_CORRECTION.match(sentence)
             if inline:
                 prefix = inline.group("prefix").strip()
                 cue = cls._normalize_cue(inline.group("cue"))
                 replacement = inline.group("replacement").strip(" ,.-")
+                if not replacement:
+                    out.append(cls._ensure_terminal_punctuation(prefix))
+                    idx += 1
+                    continue
                 if cls._should_replace_previous(cue, prefix, replacement):
                     out.append(cls._merge_with_previous(prefix, replacement))
                 else:
                     out.append(cls._ensure_terminal_punctuation(prefix))
                     out.append(cls._ensure_terminal_punctuation(replacement))
+                idx += 1
                 continue
             match = _CORRECTION_PREFIX.match(sentence)
             if match:
                 cue = cls._normalize_cue(match.group("cue"))
                 replacement = sentence[match.end():].strip(" ,.-")
                 if not replacement:
+                    idx += 1
                     continue
                 if out and cls._should_replace_previous(cue, out[-1], replacement):
                     out[-1] = cls._merge_with_previous(out[-1], replacement)
                 else:
                     out.append(cls._ensure_terminal_punctuation(replacement))
+                idx += 1
                 continue
             out.append(sentence)
+            idx += 1
         return " ".join(out)
 
     @staticmethod
@@ -401,6 +435,7 @@ class TextCleaner:
 
     @classmethod
     def _should_replace_previous(cls, cue: str, previous: str, replacement: str) -> bool:
+        previous = re.sub(r"^\s*like\s+", "", previous, flags=re.IGNORECASE)
         if cue in _STRONG_REPLACE_CUES:
             return True
         if cue in _WEAK_REPLACE_CUES:
@@ -427,6 +462,8 @@ class TextCleaner:
     def _merge_with_previous(cls, previous: str, replacement: str) -> str:
         previous = _LEADING_DISCOURSE.sub("", previous).strip()
         replacement = _LEADING_DISCOURSE.sub("", replacement).strip()
+        previous = re.sub(r"^\s*like\s+", "", previous, flags=re.IGNORECASE).strip()
+        replacement = re.sub(r"^\s*like\s+", "", replacement, flags=re.IGNORECASE).strip()
         replacement = replacement.rstrip(".!?")
         while True:
             stripped = _CORRECTION_PREFIX.sub("", replacement).strip(" ,.-")

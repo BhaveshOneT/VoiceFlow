@@ -6,7 +6,7 @@ import re
 
 log = logging.getLogger(__name__)
 
-DEFAULT_MODEL = "mlx-community/Qwen2.5-3B-Instruct-4bit"
+DEFAULT_MODEL = "mlx-community/Qwen2.5-0.5B-Instruct-4bit"
 _QUESTION_START_RE = re.compile(
     r"^\s*(who|what|when|where|why|how|is|are|am|was|were|do|does|did|can|"
     r"could|should|would|will|which|whose|whom|what's|whats|isn't|aren't|"

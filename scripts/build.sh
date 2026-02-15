@@ -60,12 +60,19 @@ else
     fi
 fi
 
-# Check for mlx_whisper assets (tokenizer files)
-ASSETS_DIR=$(find "$APP" -type d -name "assets" -path "*/mlx_whisper/*" 2>/dev/null | head -1)
-if [ -n "$ASSETS_DIR" ]; then
-    echo "  OK: mlx_whisper assets found at $ASSETS_DIR"
+# Check for local STT runtime packages.
+PARAKEET_DIR=$(find "$APP" -type d -name "parakeet_mlx" 2>/dev/null | head -1)
+if [ -n "$PARAKEET_DIR" ]; then
+    echo "  OK: parakeet_mlx package found at $PARAKEET_DIR"
 else
-    echo "  WARN: mlx_whisper assets directory not found (tokenizer may fail)"
+    echo "  WARN: parakeet_mlx package not found (local STT may fail)"
+fi
+
+WHISPER_ASSETS_DIR=$(find "$APP" -type d -name "assets" -path "*/mlx_whisper/*" 2>/dev/null | head -1)
+if [ -n "$WHISPER_ASSETS_DIR" ]; then
+    echo "  OK: mlx_whisper fallback assets found at $WHISPER_ASSETS_DIR"
+else
+    echo "  INFO: mlx_whisper fallback assets not found (acceptable for Parakeet-only builds)"
 fi
 
 if [ "$errors" -gt 0 ]; then

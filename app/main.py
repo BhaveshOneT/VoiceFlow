@@ -1,23 +1,34 @@
-"""VoiceFlow -- Local AI dictation for macOS."""
+"""VoiceFlow -- Local AI dictation & meeting intelligence for macOS.
+
+PySide6-based entry point.  Replaces the legacy rumps menu-bar-only app
+with a full windowed application while preserving all dictation features.
+"""
 from __future__ import annotations
 
 import logging
+import os
+import platform
+import signal as _signal
+import sys
 import threading
 import time
 from pathlib import Path
 
-import AppKit
 import numpy as np
-import rumps
-from PyObjCTools import AppHelper
+from PySide6.QtCore import QObject, QTimer, Signal
+from PySide6.QtGui import QAction, QIcon
+from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 
 from app.audio.capture import AudioCapture
 from app.config import AppConfig
+from app.core.signals import AppSignals
 from app.dictionary import Dictionary
 from app.input.hotkey import HotkeyListener
 from app.input.text_inserter import TextInserter
 from app.transcription import TranscriptionPipeline
 from app.ui.overlay import RecordingOverlay
+from app.ui_qt.main_window import MainWindow
+from app.ui_qt.styles.stylesheets import app_stylesheet
 
 LOG_DIR = Path.home() / "Library" / "Application Support" / "VoiceFlow" / "logs"
 LOG_PATH = LOG_DIR / "voiceflow.log"
@@ -29,7 +40,6 @@ def _configure_logging() -> None:
         LOG_DIR.mkdir(parents=True, exist_ok=True)
         handlers.append(logging.FileHandler(LOG_PATH, encoding="utf-8"))
     except Exception as exc:
-        # Keep stdout logging even if file logging is unavailable.
         logging.getLogger(__name__).debug("File logging unavailable: %s", exc)
     logging.basicConfig(
         level=logging.INFO,
@@ -45,8 +55,8 @@ log = logging.getLogger(__name__)
 RESOURCES = Path(__file__).parent / "resources"
 
 # Minimum audio length (in samples at 16 kHz) to bother transcribing.
-# 0.3 seconds = 4800 samples -- anything shorter is almost certainly noise.
 _MIN_AUDIO_SAMPLES = 4800
+
 _PROGRAMMER_BUNDLE_HINTS = (
     "com.apple.terminal",
     "com.googlecode.iterm2",
@@ -62,12 +72,9 @@ _PROGRAMMER_BUNDLE_HINTS = (
 
 
 def _check_accessibility() -> bool:
-    """Return True if the app has Accessibility permission.
-
-    Also triggers the macOS trust prompt when available.
-    """
+    """Return True if the app has Accessibility permission."""
     try:
-        from ApplicationServices import (  # type: ignore[import-untyped]
+        from ApplicationServices import (
             AXIsProcessTrusted,
             AXIsProcessTrustedWithOptions,
             kAXTrustedCheckOptionPrompt,
@@ -86,93 +93,87 @@ def _check_accessibility() -> bool:
         return True
 
 
-class VoiceFlowApp(rumps.App):
-    """Menu-bar app that wires audio capture, transcription, and text insertion."""
+class _MainThreadInvoker(QObject):
+    """Dispatch callables to the main Qt thread via a queued signal.
+
+    When ``invoke(fn)`` is called from a background thread, Qt automatically
+    uses a queued connection because the QObject lives on the main thread.
+    The connected slot ``_execute`` therefore runs on the main thread.
+    """
+
+    _call = Signal(object)
 
     def __init__(self) -> None:
-        # -- Config & dictionary -----------------------------------------------
+        super().__init__()
+        self._call.connect(self._execute)
+
+    @staticmethod
+    def _execute(fn: object) -> None:
+        try:
+            fn()  # type: ignore[operator]
+        except Exception:
+            logging.getLogger(__name__).debug(
+                "Main-thread callback failed", exc_info=True
+            )
+
+    def invoke(self, fn: object) -> None:
+        self._call.emit(fn)
+
+
+def _log_system_info() -> None:
+    """Log system diagnostics at startup."""
+    log.info(
+        "System: macOS %s, Python %s, PID %d",
+        platform.mac_ver()[0] or "unknown",
+        platform.python_version(),
+        os.getpid(),
+    )
+    try:
+        page_size = os.sysconf("SC_PAGE_SIZE")
+        page_count = os.sysconf("SC_PHYS_PAGES")
+        mem_gb = (page_size * page_count) / (1024 ** 3)
+        log.info("Physical memory: %.1f GB", mem_gb)
+    except (ValueError, OSError):
+        pass
+
+
+class VoiceFlowApplication:
+    """Main application orchestrator -- owns all components.
+
+    Replaces the legacy ``VoiceFlowApp(rumps.App)`` with PySide6.
+    """
+
+    def __init__(self) -> None:
+        # -- macOS: register as a proper GUI application -------------------
+        # Must happen BEFORE QApplication is created so macOS treats the
+        # process as a regular app (Dock icon, Cmd+Tab, windows stay front).
+        try:
+            from AppKit import NSApp, NSApplication
+            NSApplication.sharedApplication()
+            NSApp.setActivationPolicy_(0)  # 0 = NSApplicationActivationPolicyRegular
+        except Exception:
+            log.debug("Failed to set activation policy (non-fatal)")
+
+        # -- Qt app --------------------------------------------------------
+        self.qt_app = QApplication.instance() or QApplication(sys.argv)
+        self.qt_app.setApplicationName("VoiceFlow")
+        self.qt_app.setOrganizationName("VoiceFlow")
+        self.qt_app.setQuitOnLastWindowClosed(False)
+        self.qt_app.setStyleSheet(app_stylesheet())
+
+        # -- Signals (cross-thread safe) -----------------------------------
+        self.signals = AppSignals()
+        self._invoker = _MainThreadInvoker()
+
+        # -- Config & dictionary -------------------------------------------
         self.config = AppConfig.load()
         self.dictionary = Dictionary.load(Path(self.config.dictionary_path))
 
-        # -- Menu items (created before super().__init__) ----------------------
-        self._status_item = rumps.MenuItem("Status: Loading...")
-        self._test_item = rumps.MenuItem(
-            "Test Recording", callback=self._test_recording
-        )
-        self._accessibility_item = rumps.MenuItem(
-            "Open Accessibility Settings", callback=self._open_accessibility_settings
-        )
-        self._microphone_item = rumps.MenuItem(
-            "Open Microphone Settings", callback=self._open_microphone_settings
-        )
-
-        self._normal_mode_item = rumps.MenuItem(
-            "Normal Mode", callback=self._set_transcription_mode_normal
-        )
-        self._programmer_mode_item = rumps.MenuItem(
-            "Programmer Mode", callback=self._set_transcription_mode_programmer
-        )
-        self._auto_mode_switch_item = rumps.MenuItem(
-            "Auto-switch by active app",
-            callback=self._toggle_auto_mode_switch,
-        )
-        transcription_mode_menu = rumps.MenuItem("Transcription Mode")
-        transcription_mode_menu.update(
-            [
-                self._normal_mode_item,
-                self._programmer_mode_item,
-                None,
-                self._auto_mode_switch_item,
-            ]
-        )
-
-        self._fast_item = rumps.MenuItem("Fast Mode", callback=self._set_fast_mode)
-        self._standard_item = rumps.MenuItem("Standard Mode", callback=self._set_standard_mode)
-        self._max_item = rumps.MenuItem("Max Accuracy Mode", callback=self._set_max_accuracy_mode)
-
-        accuracy_menu = rumps.MenuItem("Accuracy Mode")
-        accuracy_menu.update([self._fast_item, self._standard_item, self._max_item])
-
-        self._lang_auto_item = rumps.MenuItem(
-            "Auto (English + German)", callback=self._set_language_auto
-        )
-        self._lang_en_item = rumps.MenuItem("English", callback=self._set_language_en)
-        self._lang_de_item = rumps.MenuItem("German", callback=self._set_language_de)
-        language_menu = rumps.MenuItem("Transcription Language")
-        language_menu.update(
-            [self._lang_auto_item, self._lang_en_item, self._lang_de_item]
-        )
-
-        super().__init__(
-            name="VoiceFlow",
-            title="VF ...",
-            menu=[
-                self._status_item,
-                self._test_item,
-                None,  # separator
-                self._accessibility_item,
-                self._microphone_item,
-                None,  # separator
-                transcription_mode_menu,
-                accuracy_menu,
-                language_menu,
-                None,  # separator
-            ],
-            quit_button="Quit VoiceFlow",
-        )
-
-        # Mark the current accuracy mode
-        self._sync_transcription_mode_checkmarks()
-        self._sync_mode_checkmarks()
-        self._sync_language_checkmarks()
-
-        # -- Audio & pipeline --------------------------------------------------
+        # -- Audio & pipeline ----------------------------------------------
         self.audio = AudioCapture()
         self.pipeline = TranscriptionPipeline(self.config, self.dictionary)
 
-        # -- Hotkey listener (not started until models are warm) ---------------
-        # The new HotkeyListener takes a string key name (e.g. "right_cmd")
-        # and uses native macOS NSEvent monitors instead of pynput.
+        # -- Hotkey listener -----------------------------------------------
         self.hotkey = HotkeyListener(
             on_recording_start=self._on_recording_start,
             on_recording_stop=self._on_recording_stop,
@@ -180,27 +181,164 @@ class VoiceFlowApp(rumps.App):
             mode=self.config.recording_mode,
         )
 
-        # -- Recording overlay ---------------------------------------------------
+        # -- Recording overlay (AppKit, still native) ----------------------
         self.overlay = RecordingOverlay()
 
-        # -- State flags (guarded by _lock) ------------------------------------
+        # -- State ---------------------------------------------------------
         self._lock = threading.Lock()
         self._processing = False
+        self._target_app_pid: int | None = None  # PID of app to paste into
 
-        # -- Warm up models in background --------------------------------------
+        # -- System tray ---------------------------------------------------
+        self._tray = QSystemTrayIcon()
+        self._build_tray_menu()
+        self._set_tray_title("VF ...")
+        self._tray.activated.connect(self._on_tray_activated)
+        self._tray.show()
+
+        # -- Main window ---------------------------------------------------
+        self.window = MainWindow(self.config, self.signals)
+
+        # -- Auto-transcription on meeting stop ----------------------------
+        self.signals.meeting_recording_stopped.connect(self._on_meeting_stopped)
+
+        # -- Live settings wiring ------------------------------------------
+        self.signals.hotkey_changed.connect(self._on_hotkey_setting_changed)
+        self.signals.language_changed.connect(self._on_language_setting_changed)
+        self.signals.accuracy_changed.connect(self._on_accuracy_setting_changed)
+        self.signals.transcription_mode_changed.connect(
+            self._on_transcription_mode_setting_changed
+        )
+
+        # -- Start model warm-up -------------------------------------------
         threading.Thread(target=self._warm_up_models, daemon=True).start()
 
-    # ======================================================================
-    # Recording lifecycle
-    # ======================================================================
+    # ==================================================================
+    # System tray
+    # ==================================================================
+
+    def _build_tray_menu(self) -> None:
+        menu = QMenu()
+
+        self._status_action = QAction("Status: Loading...")
+        self._status_action.setEnabled(False)
+        menu.addAction(self._status_action)
+
+        menu.addSeparator()
+
+        show_action = QAction("Show Window")
+        show_action.triggered.connect(self._show_window)
+        menu.addAction(show_action)
+
+        menu.addSeparator()
+
+        quit_action = QAction("Quit VoiceFlow")
+        quit_action.triggered.connect(self._quit)
+        menu.addAction(quit_action)
+
+        self._tray.setContextMenu(menu)
+
+    def _set_tray_title(self, title: str) -> None:
+        def _do() -> None:
+            self._tray.setToolTip(title)
+        self._run_on_main_thread(_do)
+
+    def _on_tray_activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
+        if reason in (
+            QSystemTrayIcon.ActivationReason.Trigger,
+            QSystemTrayIcon.ActivationReason.DoubleClick,
+        ):
+            self._show_window()
+
+    def _show_window(self) -> None:
+        self.window.show()
+        self.window.raise_()
+        self.window.activateWindow()
+        # macOS: force Python process to the foreground (required when
+        # running from terminal or when the process lacks a .app bundle).
+        try:
+            from AppKit import NSApp
+            NSApp.activateIgnoringOtherApps_(True)
+        except Exception:
+            pass
+
+    def _quit(self) -> None:
+        shutdown_start = time.perf_counter()
+        log.info("Shutting down VoiceFlow...")
+
+        # Stop hotkey listener
+        try:
+            self.hotkey.stop()
+        except Exception:
+            log.debug("Error stopping hotkey listener", exc_info=True)
+
+        # Stop any active audio capture
+        try:
+            if self.audio.is_active():
+                self.audio.stop()
+        except Exception:
+            log.debug("Error stopping audio capture", exc_info=True)
+
+        # Clear processing state
+        with self._lock:
+            self._processing = False
+
+        # Unload refiner model
+        try:
+            if self.pipeline.refiner and self.pipeline.refiner.loaded:
+                self.pipeline.refiner.unload()
+        except Exception:
+            log.debug("Error unloading refiner", exc_info=True)
+
+        # Unload STT model if method exists
+        try:
+            stt_engine = getattr(self.pipeline, "stt", getattr(self.pipeline, "whisper", None))
+            if stt_engine and hasattr(stt_engine, "unload"):
+                stt_engine.unload()
+        except Exception:
+            log.debug("Error unloading STT model", exc_info=True)
+
+        # Close database
+        try:
+            db = getattr(getattr(self, "window", None), "_db", None)
+            if db and hasattr(db, "close"):
+                db.close()
+        except Exception:
+            log.debug("Error closing database", exc_info=True)
+
+        # Release PID lock
+        _release_single_instance_lock()
+
+        # Hide tray
+        try:
+            self._tray.hide()
+        except Exception:
+            log.debug("Error hiding tray", exc_info=True)
+
+        shutdown_ms = (time.perf_counter() - shutdown_start) * 1000.0
+        log.info("VoiceFlow shutdown complete (%.1fms)", shutdown_ms)
+        self.qt_app.quit()
+
+    # ==================================================================
+    # Recording lifecycle (identical logic to legacy main.py)
+    # ==================================================================
 
     def _on_recording_start(self) -> None:
-        """Called when the hotkey is pressed (hold starts)."""
         with self._lock:
             if self._processing:
                 log.debug("Still processing previous audio; ignoring new recording")
                 return
         log.info("Recording started")
+        # Remember which app was frontmost so we paste into it later.
+        # With PySide6 as a visible app, VoiceFlow could steal focus.
+        # If VoiceFlow itself is frontmost, don't capture it -- leave
+        # _target_app_pid as None so we fall through to the retry logic.
+        front_pid = self._frontmost_app_pid()
+        if front_pid != os.getpid():
+            self._target_app_pid = front_pid
+        else:
+            self._target_app_pid = None
+            log.debug("VoiceFlow is frontmost at recording start; skipping PID capture")
         self._apply_auto_transcription_mode()
         try:
             self.audio.drain()
@@ -212,18 +350,13 @@ class VoiceFlowApp(rumps.App):
                 message="Unable to start audio capture. Check microphone permission.",
             )
             return
-        self._set_title("VF \u25cf")  # bullet
+        self._set_tray_title("VF \u25cf")
         self._set_status("Recording")
         self.overlay.show_recording()
 
     def _on_recording_stop(self, cancelled: bool = False) -> None:
-        """Called when the hotkey is released.
-
-        *cancelled=True* means the hold was shorter than the minimum hold
-        duration -- discard the audio.
-        """
         if not self.audio.is_active():
-            return  # Already stopped (duplicate key event from macOS)
+            return
 
         capture_stop_started = time.perf_counter()
         audio = self.audio.stop()
@@ -231,14 +364,14 @@ class VoiceFlowApp(rumps.App):
 
         if cancelled:
             log.info("Recording cancelled (hold too short)")
-            self._set_title("VF")
+            self._set_tray_title("VF")
             self._set_status("Ready")
             self.overlay.hide()
             return
 
         if audio.size < _MIN_AUDIO_SAMPLES:
             log.info("Audio too short (%d samples); discarding", audio.size)
-            self._set_title("VF")
+            self._set_tray_title("VF")
             self._set_status("Ready")
             self.overlay.hide()
             return
@@ -246,7 +379,7 @@ class VoiceFlowApp(rumps.App):
         rms = float(np.sqrt(np.mean(np.square(audio))))
         if rms < 0.003:
             log.info("Audio is silence (rms=%.6f); discarding", rms)
-            self._set_title("VF")
+            self._set_tray_title("VF")
             self._set_status("Ready")
             self.overlay.hide()
             return
@@ -257,23 +390,21 @@ class VoiceFlowApp(rumps.App):
             audio.size / AudioCapture.SAMPLE_RATE,
             capture_stop_ms,
         )
-        self._set_title("VF ...")
+        self._set_tray_title("VF ...")
         self._set_status("Processing")
         self.overlay.show_processing()
         with self._lock:
             self._processing = True
 
-        # Process in a background thread so the hotkey listener stays responsive.
         threading.Thread(
             target=self._process_audio, args=(audio,), daemon=True
         ).start()
 
-    # ======================================================================
-    # Audio processing (runs in background thread)
-    # ======================================================================
+    # ==================================================================
+    # Audio processing (background thread)
+    # ==================================================================
 
     def _process_audio(self, audio: np.ndarray) -> None:
-        """Run the transcription pipeline and insert the result."""
         process_started = time.perf_counter()
         pipeline_ms = 0.0
         try:
@@ -287,16 +418,17 @@ class VoiceFlowApp(rumps.App):
                 title="Transcription failed",
                 message=f"{detail}. Check VoiceFlow logs for details.",
             )
-            return
-        finally:
             with self._lock:
                 self._processing = False
+            return
 
         if not result:
             log.info("Pipeline returned empty result (no speech detected)")
-            self._set_title("VF")
+            self._set_tray_title("VF")
             self._set_status("Ready")
             self.overlay.hide()
+            with self._lock:
+                self._processing = False
             return
 
         log.info(
@@ -304,6 +436,22 @@ class VoiceFlowApp(rumps.App):
             len(result),
             len(result.split()),
         )
+        # Ensure the user's target app is frontmost before pasting.
+        # With PySide6 as a visible app, VoiceFlow could have stolen focus.
+        self._reactivate_target_app()
+        # Verify we're not about to paste into ourselves.
+        own_pid = os.getpid()
+        current_front = self._frontmost_app_pid()
+        if current_front == own_pid:
+            log.warning(
+                "VoiceFlow is still frontmost after reactivation; "
+                "retrying activation"
+            )
+            self._reactivate_target_app()
+            time.sleep(0.25)
+        else:
+            time.sleep(0.15)  # let macOS complete the app switch
+
         paste_started = time.perf_counter()
         inserted = TextInserter.insert(result, self.config.restore_clipboard)
         paste_ms = (time.perf_counter() - paste_started) * 1000.0
@@ -314,159 +462,40 @@ class VoiceFlowApp(rumps.App):
             paste_ms,
             total_ms,
         )
+
+        # Release the processing lock AFTER paste completes to prevent
+        # overlapping dictations from racing on the clipboard / Cmd+V.
+        with self._lock:
+            self._processing = False
+
         if not inserted:
             detail = TextInserter.last_error or "Paste failed"
             if "Accessibility permission required" in detail:
                 self.overlay.hide()
-                self._set_title("VF")
+                self._set_tray_title("VF")
                 self._set_status("Paste permission required")
-                self._notify(
-                    title="Paste Permission Required",
-                    subtitle="VoiceFlow copied text to clipboard",
-                    message=(
-                        "Enable Accessibility for VoiceFlow to auto-paste. "
-                        "You can paste now with Command+V."
-                    ),
-                )
+                self._run_on_main_thread(lambda: self._tray.showMessage(
+                    "Paste Permission Required",
+                    "Enable Accessibility for VoiceFlow to auto-paste. "
+                    "You can paste now with Command+V.",
+                    QSystemTrayIcon.MessageIcon.Warning,
+                    5000,
+                ))
                 self._open_system_settings("Privacy_Accessibility")
                 return
             self._show_error(title="Paste failed", message=detail)
             return
 
-        self._set_title("VF")
+        self.signals.transcription_complete.emit(result)
+        self._set_tray_title("VF")
         self._set_status("Ready")
         self.overlay.hide()
 
-    def _reset_title(self) -> None:
-        self._set_title("VF")
-
-    # ======================================================================
-    # Test Recording (manual trigger from menu, bypasses hotkey)
-    # ======================================================================
-
-    def _test_recording(self, sender: rumps.MenuItem) -> None:
-        """Simulate a 3-second recording to test overlay + pipeline."""
-        log.info("Test recording triggered from menu")
-
-        with self._lock:
-            if self._processing:
-                log.info("Already processing; ignoring test")
-                return
-
-        # Show overlay immediately
-        self.overlay.show_recording()
-        self._set_title("VF \u25cf")
-        self._set_status("Recording")
-        try:
-            self.audio.drain()
-            self.audio.start()
-        except Exception:
-            log.exception("Failed to start microphone capture (test)")
-            self._show_error(
-                title="Microphone error",
-                message="Unable to start audio capture. Check microphone permission.",
-            )
-            return
-
-        def _stop_after_delay():
-            import time
-            time.sleep(3)
-            log.info("Test recording: stopping after 3s")
-            AppHelper.callAfter(self._on_recording_stop, False)
-
-        threading.Thread(target=_stop_after_delay, daemon=True).start()
-
-    # ======================================================================
-    # Accuracy mode menu callbacks
-    # ======================================================================
-
-    def _set_fast_mode(self, sender: rumps.MenuItem) -> None:
-        self._switch_mode("fast")
-
-    def _set_standard_mode(self, sender: rumps.MenuItem) -> None:
-        self._switch_mode("standard")
-
-    def _set_max_accuracy_mode(self, sender: rumps.MenuItem) -> None:
-        self._switch_mode("max_accuracy")
-
-    def _switch_mode(self, mode: str) -> None:
-        old_mode = self.config.cleanup_mode
-        if old_mode == mode:
-            return
-        log.info("Switching accuracy mode to %s", mode)
-        try:
-            self.pipeline.set_cleanup_mode(mode)
-        except Exception as exc:
-            log.exception("Failed to switch accuracy mode to %s", mode)
-            self.config.cleanup_mode = old_mode
-            self.config.save()
-            try:
-                self.pipeline.set_cleanup_mode(old_mode)
-            except Exception:
-                log.exception("Failed to restore previous accuracy mode %s", old_mode)
-            self._sync_mode_checkmarks()
-            self._show_error(
-                title="Mode switch failed",
-                message=f"{exc}",
-            )
-            return
-        self.config.cleanup_mode = mode
-        self.config.save()
-        self._sync_mode_checkmarks()
-        self._set_status(f"{mode.replace('_', ' ').title()} mode")
-
-    def _sync_mode_checkmarks(self) -> None:
-        mode = self.config.cleanup_mode
-        self._fast_item.state = mode == "fast"
-        self._standard_item.state = mode == "standard"
-        self._max_item.state = mode == "max_accuracy"
-
-    def _set_transcription_mode_normal(self, sender: rumps.MenuItem) -> None:
-        self._switch_transcription_mode("normal")
-
-    def _set_transcription_mode_programmer(self, sender: rumps.MenuItem) -> None:
-        self._switch_transcription_mode("programmer")
-
-    def _switch_transcription_mode(self, mode: str) -> None:
-        old_mode = self.config.transcription_mode
-        if old_mode == mode:
-            return
-        log.info("Switching transcription mode to %s", mode)
-        try:
-            self.pipeline.set_transcription_mode(mode)
-        except Exception as exc:
-            log.exception("Failed to switch transcription mode to %s", mode)
-            self.config.transcription_mode = old_mode
-            self.config.save()
-            self._sync_transcription_mode_checkmarks()
-            self._show_error(
-                title="Mode switch failed",
-                message=f"{exc}",
-            )
-            return
-
-        self.config.transcription_mode = mode
-        self.config.save()
-        self._sync_transcription_mode_checkmarks()
-        label = "Programmer" if mode == "programmer" else "Normal"
-        self._set_status(f"{label} transcription mode")
-
-    def _toggle_auto_mode_switch(self, sender: rumps.MenuItem) -> None:
-        enabled = not self.config.auto_mode_switch
-        self.config.auto_mode_switch = enabled
-        self.config.save()
-        self._sync_transcription_mode_checkmarks()
-        state = "enabled" if enabled else "disabled"
-        self._set_status(f"Auto mode switch {state}")
-
-    def _sync_transcription_mode_checkmarks(self) -> None:
-        mode = self.config.transcription_mode
-        self._normal_mode_item.state = mode == "normal"
-        self._programmer_mode_item.state = mode == "programmer"
-        self._auto_mode_switch_item.state = bool(self.config.auto_mode_switch)
+    # ==================================================================
+    # Auto transcription mode switching
+    # ==================================================================
 
     def _apply_auto_transcription_mode(self) -> None:
-        """Switch mode from the currently focused app when auto-switch is enabled."""
         if not self.config.auto_mode_switch:
             return
         app_name, bundle_id = self._frontmost_app_info()
@@ -487,14 +516,14 @@ class VoiceFlowApp(rumps.App):
             self.pipeline.set_transcription_mode(desired)
             self.config.transcription_mode = desired
             self.config.save()
-            self._sync_transcription_mode_checkmarks()
         except Exception:
             log.exception("Failed auto-switching transcription mode to %s", desired)
 
     @staticmethod
     def _frontmost_app_info() -> tuple[str, str]:
         try:
-            app = AppKit.NSWorkspace.sharedWorkspace().frontmostApplication()
+            import AppKit as AK
+            app = AK.NSWorkspace.sharedWorkspace().frontmostApplication()
             if app is None:
                 return "", ""
             name = str(app.localizedName() or "")
@@ -521,55 +550,13 @@ class VoiceFlowApp(rumps.App):
             return "programmer"
         return "normal"
 
-    def _set_language_auto(self, sender: rumps.MenuItem) -> None:
-        self._switch_language("auto")
-
-    def _set_language_en(self, sender: rumps.MenuItem) -> None:
-        self._switch_language("en")
-
-    def _set_language_de(self, sender: rumps.MenuItem) -> None:
-        self._switch_language("de")
-
-    def _switch_language(self, language: str) -> None:
-        old_language = self.config.language
-        if old_language == language:
-            return
-        log.info("Switching transcription language to %s", language)
-        try:
-            self.pipeline.set_language(language)
-        except Exception as exc:
-            log.exception("Failed to switch language to %s", language)
-            self.config.language = old_language
-            self.config.save()
-            self._sync_language_checkmarks()
-            self._show_error(
-                title="Language switch failed",
-                message=f"{exc}",
-            )
-            return
-        self.config.language = language
-        self.config.save()
-        self._sync_language_checkmarks()
-        label = {
-            "auto": "Auto (EN+DE)",
-            "en": "English",
-            "de": "German",
-        }.get(language, language)
-        self._set_status(f"Language: {label}")
-
-    def _sync_language_checkmarks(self) -> None:
-        lang = self.config.language
-        self._lang_auto_item.state = lang == "auto"
-        self._lang_en_item.state = lang == "en"
-        self._lang_de_item.state = lang == "de"
-
-    # ======================================================================
-    # Model warm-up (background thread at startup)
-    # ======================================================================
+    # ==================================================================
+    # Model warm-up (background thread)
+    # ==================================================================
 
     def _warm_up_models(self) -> None:
-        """Warm up Whisper first so recording can start quickly; load LLM in background."""
         self._set_status("Loading speech model...")
+        self.signals.model_loading.emit("stt")
         try:
             self.pipeline.warm_up_for_realtime()
         except Exception:
@@ -580,140 +567,336 @@ class VoiceFlowApp(rumps.App):
             )
             return
 
-        active_whisper_model = self.pipeline.whisper.model_name
+        self.signals.model_loaded.emit("stt")
+
+        active_stt_model = self.pipeline.stt.model_name
         if (
             self.config.cleanup_mode == "max_accuracy"
-            and active_whisper_model != self.config.max_accuracy_whisper_model
+            and active_stt_model != self.config.max_accuracy_stt_model
         ):
-            self._notify(
-                title="Max Accuracy Fallback",
-                subtitle="VoiceFlow is using fallback Whisper model",
-                message=(
-                    f"Configured model unavailable; using {active_whisper_model}."
-                ),
-            )
-            log.warning(
-                "Configured max accuracy model unavailable; using fallback model %s",
-                active_whisper_model,
-            )
+            _fallback_msg = f"Configured model unavailable; using {active_stt_model}."
+            self._run_on_main_thread(lambda: self._tray.showMessage(
+                "Max Accuracy Fallback",
+                _fallback_msg,
+                QSystemTrayIcon.MessageIcon.Warning,
+                5000,
+            ))
 
-        # Check Accessibility permission (needed for hotkeys + text insertion)
+        # Check Accessibility permission
         try:
             if not _check_accessibility():
                 log.warning("Accessibility permission not granted")
                 self._set_status("Accessibility required")
-                self._notify(
-                    title="Accessibility Permission Required",
-                    subtitle="VoiceFlow needs Accessibility access",
-                    message=(
-                        "Open System Settings > Privacy & Security > "
-                        "Accessibility and enable VoiceFlow, then restart."
-                    ),
-                )
+                self._run_on_main_thread(lambda: self._tray.showMessage(
+                    "Accessibility Permission Required",
+                    "Open System Settings > Privacy & Security > "
+                    "Accessibility and enable VoiceFlow, then restart.",
+                    QSystemTrayIcon.MessageIcon.Warning,
+                    8000,
+                ))
         except Exception:
             log.exception("Accessibility check failed (non-fatal)")
 
-        # Start the hotkey listener (dispatches to main thread internally)
+        # Start the hotkey listener
         self.hotkey.start()
         log.info("Hotkey listener start requested")
 
         self._set_status("Ready")
-        self._set_title("VF")
+        self._set_tray_title("VF")
         log.info("VoiceFlow ready")
 
-        # Load the optional LLM refiner in background so startup/hotkey
-        # availability is not blocked by large model download/load.
+        # Load optional LLM refiner in background
         if self.pipeline.refiner and not self.pipeline.refiner.loaded:
             threading.Thread(target=self._warm_up_refiner_background, daemon=True).start()
 
     def _warm_up_refiner_background(self) -> None:
+        self.signals.model_loading.emit("refiner")
         try:
             self.pipeline.warm_up_refiner()
-            self._notify(
-                title="VoiceFlow",
-                subtitle="Refiner ready",
-                message="Enhanced post-processing model is now loaded.",
-            )
+            self.signals.model_loaded.emit("refiner")
         except Exception:
-            # Non-fatal: app remains fully usable with deterministic cleanup.
             log.exception("Background LLM warm-up failed (continuing without refiner)")
 
-    # ======================================================================
-    # Cleanup
-    # ======================================================================
+    # ==================================================================
+    # Meeting auto-transcription + summarization
+    # ==================================================================
 
-    def terminate(self) -> None:  # called by rumps on quit
-        log.info("Shutting down VoiceFlow")
-        self.hotkey.stop()
-        if self.audio.is_active():
-            self.audio.stop()
-        if self.pipeline.refiner and self.pipeline.refiner.loaded:
-            self.pipeline.refiner.unload()
+    def _on_meeting_stopped(self, meeting_id: str) -> None:
+        """Triggered when a meeting recording stops."""
+        if not self.config.auto_transcribe_on_stop:
+            log.info("Auto-transcribe disabled; skipping for meeting %s", meeting_id)
+            return
+        threading.Thread(
+            target=self._process_meeting, args=(meeting_id,), daemon=True
+        ).start()
 
-    # ======================================================================
+    def _process_meeting(self, meeting_id: str) -> None:
+        """Background: transcribe and optionally summarize a meeting."""
+        import uuid as _uuid
+
+        from app.core.model_manager import ModelManager
+        from app.storage.models import MeetingStatus, MeetingSummary
+        from app.transcription.diarization import SpeakerDiarizer
+        from app.transcription.meeting_summarizer import MeetingSummarizer
+        from app.transcription.meeting_transcriber import MeetingTranscriber
+
+        db = self.window._db
+        meeting = db.get_meeting(meeting_id)
+        if not meeting or not meeting.audio_path:
+            log.warning("Cannot process meeting %s: missing audio path", meeting_id)
+            return
+
+        audio_path = Path(meeting.audio_path)
+        if not audio_path.exists():
+            log.warning("Audio file missing for meeting %s: %s", meeting_id, audio_path)
+            return
+
+        model_manager = ModelManager(self.signals)
+        model_manager.register_stt(
+            load_fn=lambda: self.pipeline.warm_up_for_realtime(),
+            unload_fn=lambda: None,
+        )
+
+        diarizer = None
+        if SpeakerDiarizer.is_available():
+            diarizer = SpeakerDiarizer(auth_token=self.config.pyannote_auth_token or None)
+            model_manager.register_diarizer(
+                load_fn=diarizer.load,
+                unload_fn=diarizer.unload,
+            )
+        else:
+            log.info("pyannote.audio not installed; skipping diarization for meeting %s", meeting_id)
+
+        try:
+            transcriber = MeetingTranscriber(
+                stt=self.pipeline.stt,
+                diarizer=diarizer,
+                model_manager=model_manager,
+                db=db,
+                signals=self.signals,
+                transcription_provider=self.config.meeting_transcription_provider,
+                openai_api_key=self.config.openai_api_key,
+            )
+            log.info("Starting auto-transcription for meeting %s", meeting_id)
+            self._set_status("Transcribing meeting...")
+            transcriber.process_meeting(meeting_id, audio_path)
+        except Exception:
+            log.exception("Auto-transcription failed for meeting %s", meeting_id)
+            self._set_status("Meeting transcription failed")
+            return
+
+        # Optional auto-summarization
+        if self.config.auto_summarize:
+            try:
+                self._set_status("Summarizing meeting...")
+                db.update_meeting(meeting_id, status=MeetingStatus.SUMMARIZING)
+                segments = db.get_segments(meeting_id)
+                transcript_text = "\n".join(seg.text for seg in segments if seg.text)
+                if transcript_text.strip():
+                    summarizer = MeetingSummarizer(
+                        provider=self.config.summary_provider,
+                        api_key=self.config.openai_api_key,
+                    )
+                    result = summarizer.summarize(transcript_text)
+                    summary = MeetingSummary(
+                        id=str(_uuid.uuid4()),
+                        meeting_id=meeting_id,
+                        summary_text=result.summary_text,
+                        key_points=result.key_points,
+                        action_items=result.action_items,
+                    )
+                    db.save_summary(summary)
+                    db.update_meeting(meeting_id, status=MeetingStatus.COMPLETE)
+                    log.info("Auto-summarization complete for meeting %s", meeting_id)
+            except Exception:
+                log.exception("Auto-summarization failed for meeting %s", meeting_id)
+
+        self._set_status("Ready")
+
+    # ==================================================================
+    # Live settings handlers (connected to AppSignals)
+    # ==================================================================
+
+    def _on_hotkey_setting_changed(self, key: str) -> None:
+        log.info("Applying hotkey change: %s", key)
+        self.hotkey.update_key(key)
+
+    def _on_language_setting_changed(self, language: str) -> None:
+        log.info("Applying language change: %s", language)
+        try:
+            self.pipeline.set_language(language)
+        except Exception:
+            log.exception("Failed to apply language change")
+
+    def _on_accuracy_setting_changed(self, mode: str) -> None:
+        log.info("Applying accuracy mode change: %s", mode)
+        try:
+            self.pipeline.set_cleanup_mode(mode)
+        except Exception:
+            log.exception("Failed to apply accuracy mode change")
+
+    def _on_transcription_mode_setting_changed(self, mode: str) -> None:
+        log.info("Applying transcription mode change: %s", mode)
+        try:
+            self.pipeline.set_transcription_mode(mode)
+        except Exception:
+            log.exception("Failed to apply transcription mode change")
+
+    # ==================================================================
     # Helpers
-    # ======================================================================
+    # ==================================================================
+
+    def _run_on_main_thread(self, callback: object) -> None:
+        """Schedule *callback* to execute on the main Qt thread.
+
+        If already on the main thread the callback runs immediately;
+        otherwise it is dispatched via ``_MainThreadInvoker``.
+        """
+        if threading.current_thread() is threading.main_thread():
+            try:
+                callback()  # type: ignore[operator]
+            except Exception:
+                log.debug("Main-thread callback failed", exc_info=True)
+        else:
+            self._invoker.invoke(callback)
 
     def _set_status(self, status: str) -> None:
-        AppHelper.callAfter(self._set_status_on_main_thread, status)
-
-    def _set_status_on_main_thread(self, status: str) -> None:
-        self._status_item.title = f"Status: {status}"
-
-    def _set_title(self, title: str) -> None:
-        AppHelper.callAfter(self._set_title_on_main_thread, title)
-
-    def _set_title_on_main_thread(self, title: str) -> None:
-        self.title = title
-
-    def _notify(self, title: str, subtitle: str, message: str) -> None:
-        AppHelper.callAfter(self._notify_on_main_thread, title, subtitle, message)
-
-    def _notify_on_main_thread(self, title: str, subtitle: str, message: str) -> None:
-        rumps.notification(title=title, subtitle=subtitle, message=message)
+        def _do() -> None:
+            self._status_action.setText(f"Status: {status}")
+        self._run_on_main_thread(_do)
+        self.signals.status_changed.emit(status)
 
     def _show_error(self, title: str, message: str) -> None:
         log.error("%s: %s", title, message)
-        self._set_title("VF !")
-        self._set_status(title)
-        self.overlay.hide()
+        self.signals.error_occurred.emit(title, message)
+        self.signals.status_changed.emit(title)
+
+        def _do() -> None:
+            self._tray.setToolTip("VF !")
+            self._status_action.setText(f"Status: {title}")
+            try:
+                self._tray.showMessage(
+                    title, message, QSystemTrayIcon.MessageIcon.Critical, 5000,
+                )
+            except Exception:
+                log.debug("Tray notification failed", exc_info=True)
+            QTimer.singleShot(2000, lambda: self._tray.setToolTip("VF"))
+
+        self._run_on_main_thread(_do)
+        self.overlay.hide()  # already thread-safe via AppHelper.callAfter
+
+    @staticmethod
+    def _open_system_settings(pane: str) -> None:
         try:
-            self._notify(
-                title=title,
-                subtitle="VoiceFlow",
-                message=message,
-            )
-        except Exception:
-            log.debug("Notification failed", exc_info=True)
-        threading.Timer(2.0, self._reset_title).start()
-
-    def _open_accessibility_settings(self, sender: rumps.MenuItem) -> None:
-        self._open_system_settings("Privacy_Accessibility")
-
-    def _open_microphone_settings(self, sender: rumps.MenuItem) -> None:
-        self._open_system_settings("Privacy_Microphone")
-
-    def _open_system_settings(self, pane: str) -> None:
-        url = f"x-apple.systempreferences:com.apple.preference.security?{pane}"
-        try:
-            ns_url = AppKit.NSURL.URLWithString_(url)
-            if ns_url is None:
-                raise ValueError(f"Invalid macOS settings URL: {url}")
-            opened = AppKit.NSWorkspace.sharedWorkspace().openURL_(ns_url)
-            if not opened:
-                raise RuntimeError(f"macOS refused to open settings URL: {url}")
+            import AppKit as AK
+            url = f"x-apple.systempreferences:com.apple.preference.security?{pane}"
+            ns_url = AK.NSURL.URLWithString_(url)
+            if ns_url:
+                AK.NSWorkspace.sharedWorkspace().openURL_(ns_url)
         except Exception:
             log.exception("Failed to open System Settings: %s", pane)
 
+    @staticmethod
+    def _frontmost_app_pid() -> int | None:
+        """Return the PID of the currently frontmost macOS application."""
+        try:
+            from AppKit import NSWorkspace
+            front = NSWorkspace.sharedWorkspace().frontmostApplication()
+            if front:
+                return front.processIdentifier()
+        except Exception:
+            log.debug("Could not get frontmost app PID", exc_info=True)
+        return None
+
+    def _reactivate_target_app(self) -> None:
+        """Reactivate the app that was frontmost when recording started."""
+        pid = self._target_app_pid
+        if pid is None:
+            return
+        try:
+            from AppKit import NSRunningApplication
+            target = NSRunningApplication.runningApplicationWithProcessIdentifier_(pid)
+            if target and not target.isTerminated():
+                # NSApplicationActivateIgnoringOtherApps = 1 << 1 = 2
+                target.activateWithOptions_(2)
+                log.debug("Reactivated target app PID=%d (%s)", pid, target.localizedName())
+            else:
+                log.debug("Target app PID=%d no longer running", pid)
+        except Exception:
+            log.debug("Failed to reactivate target app PID=%d", pid, exc_info=True)
+
+    # ==================================================================
+    # Run
+    # ==================================================================
+
+    def run(self) -> int:
+        """Start the application event loop."""
+        self._show_window()
+        return self.qt_app.exec()
+
+
+# Backward-compatible class alias for legacy imports/tests.
+VoiceFlowApp = VoiceFlowApplication
+
+_LOCK_PATH = Path.home() / "Library" / "Application Support" / "VoiceFlow" / ".lock"
+
+
+def _acquire_single_instance_lock() -> bool:
+    """Ensure only one VoiceFlow process runs at a time.
+
+    Uses a PID-based lock file.  Returns True if we acquired the lock.
+    If another instance is alive, prints a message and returns False.
+    """
+    _LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
+    if _LOCK_PATH.exists():
+        try:
+            old_pid = int(_LOCK_PATH.read_text().strip())
+            # Check if that PID is still alive
+            os.kill(old_pid, 0)
+            # Process exists -- refuse to start
+            print(f"VoiceFlow is already running (PID {old_pid}). Exiting.")
+            return False
+        except (ValueError, OSError):
+            pass  # stale lock or process gone
+    _LOCK_PATH.write_text(str(os.getpid()))
+    return True
+
+
+def _release_single_instance_lock() -> None:
+    try:
+        if _LOCK_PATH.exists():
+            pid_in_file = int(_LOCK_PATH.read_text().strip())
+            if pid_in_file == os.getpid():
+                _LOCK_PATH.unlink()
+    except Exception:
+        pass
+
 
 def main() -> None:
-    # Required for PyInstaller: prevents child processes (e.g. multiprocessing
-    # resource_tracker) from re-executing the full app on macOS.
+    import atexit
     import multiprocessing
     multiprocessing.freeze_support()
 
-    app = VoiceFlowApp()
-    app.run()
+    _log_system_info()
+
+    if not _acquire_single_instance_lock():
+        sys.exit(1)
+    atexit.register(_release_single_instance_lock)
+
+    app = VoiceFlowApplication()
+
+    # Allow Ctrl+C / SIGTERM to trigger clean shutdown
+    _signal.signal(_signal.SIGINT, lambda *_: app._quit())
+    _signal.signal(_signal.SIGTERM, lambda *_: app._quit())
+
+    # Periodic timer lets Python process signal handlers during the Qt
+    # event loop (which otherwise blocks signal delivery).
+    # Must be stored on `app` to prevent garbage collection.
+    app._signal_timer = QTimer()
+    app._signal_timer.start(500)
+    app._signal_timer.timeout.connect(lambda: None)
+
+    sys.exit(app.run())
 
 
 if __name__ == "__main__":

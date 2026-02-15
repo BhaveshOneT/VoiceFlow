@@ -4,6 +4,7 @@ version = "1.0.0"
 description = "Local AI dictation for macOS - WisprFlow clone"
 requires-python = ">=3.10"
 dependencies = [
+    "PySide6>=6.6.0",
     "rumps>=0.4.0",
     "sounddevice>=0.5.0",
     "numpy>=1.24",
@@ -12,9 +13,11 @@ dependencies = [
     "pyobjc-framework-Quartz>=10.0",
     "pyobjc-framework-ApplicationServices>=10.0",
     "onnxruntime>=1.17.0",
+    "parakeet-mlx>=0.5.0",
     "mlx-whisper>=0.4.0",
     "mlx-lm>=0.18.0",
     "huggingface-hub>=0.20.0",
+    "soundfile>=0.12.0",
     "certifi",
 ]
 
